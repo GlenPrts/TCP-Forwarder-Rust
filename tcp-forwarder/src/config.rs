@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 // 顶级配置结构
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// 服务器配置
     pub server: ServerConfig,
@@ -18,14 +18,14 @@ pub struct Config {
 }
 
 // 服务器配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     /// 监听地址和端口
     pub listen_addr: SocketAddr,
 }
 
 // 日志配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct LoggingConfig {
     /// 日志级别: trace, debug, info, warn, error
     pub level: String,
@@ -36,7 +36,7 @@ pub struct LoggingConfig {
 }
 
 // 指标监控配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MetricsConfig {
     /// 是否启用指标监控
     pub enabled: bool,
@@ -200,15 +200,15 @@ pub struct SelectorConfig {
 // 切换策略配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct SwitchingPolicyConfig {
-    /// 切换阈值百分比
-    pub switch_up_percent: f64,
-    /// 最小持有时间
+    /// 防抖间隔：两次切换之间的最小时间
     #[serde(with = "humantime_serde")]
-    pub min_hold_duration: std::time::Duration,
+    pub debounce_interval: std::time::Duration,
+    /// 分数改进阈值：只有当新IP集合的平均分比当前集合高出至少这个值时才切换
+    pub score_improvement_threshold: f64,
 }
 
 // 连接池与负载均衡配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct PoolsConfig {
     /// 负载均衡算法
     pub algorithm: String,
@@ -219,7 +219,7 @@ pub struct PoolsConfig {
 }
 
 // 连接池通用配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct PoolCommonConfig {
     /// 连接超时
     #[serde(with = "humantime_serde")]
@@ -233,7 +233,7 @@ pub struct PoolCommonConfig {
 }
 
 // 连接池策略配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct PoolStrategyConfig {
     /// 策略类型: static, dynamic
     #[serde(rename = "type")]
@@ -245,14 +245,14 @@ pub struct PoolStrategyConfig {
 }
 
 // 静态策略配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct StaticStrategyConfig {
     /// 每个远程IP的连接池大小
     pub size_per_remote: usize,
 }
 
 // 动态策略配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct DynamicStrategyConfig {
     /// 最小连接池大小
     pub min_size: usize,
@@ -263,7 +263,7 @@ pub struct DynamicStrategyConfig {
 }
 
 // 伸缩配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ScalingConfig {
     /// 调整间隔
     #[serde(with = "humantime_serde")]

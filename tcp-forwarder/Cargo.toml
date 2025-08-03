@@ -20,3 +20,5 @@ humantime-serde = "1.1"
 anyhow = "1.0"
 # 并发数据结构
 dashmap = "5.4"
+# 随机数
+rand = "0.8"

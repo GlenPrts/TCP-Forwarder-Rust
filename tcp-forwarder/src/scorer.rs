@@ -132,6 +132,44 @@ impl ScoreData {
         total_score.max(0.0)
     }
 
+        /// 获取总分（使用当前上下文的配置）
+    pub fn total_score(&self) -> f64 {
+        // 使用缓存的值作为简单近似分数
+        // 实际应用中可能需要更复杂的计算或缓存机制
+        let latency_score = self.latency_ewma.value();
+        let jitter_score = self.jitter_ewma.value();
+        let success_score = self.success_rate_ewma.value() * 100.0; // 放大为0-100分
+        
+        // 基础分是成功率、延迟和抖动的综合评分
+        let base_score = success_score - latency_score / 10.0 - jitter_score / 5.0;
+        
+        // 应用惩罚和奖励
+        (base_score - self.failure_penalty + self.historical_bonus).max(0.0)
+    }
+
+    /// 记录连接成功
+    pub fn record_success(&mut self, latency: Duration) {
+        // 简化版的成功记录，用于实际转发连接
+        self.success_rate_ewma.update(1.0);
+        let latency_ms = latency.as_millis() as f64;
+        let old_latency = self.latency_ewma.value();
+        let jitter = (latency_ms - old_latency).abs();
+        
+        self.latency_ewma.update(latency_ms);
+        self.jitter_ewma.update(jitter);
+        
+        self.consecutive_failures = 0;
+        self.consecutive_successes += 1;
+    }
+    
+    /// 记录连接失败
+    pub fn record_failure(&mut self) {
+        // 简化版的失败记录，用于实际转发连接
+        self.success_rate_ewma.update(0.0);
+        self.consecutive_failures += 1;
+        self.consecutive_successes = 0;
+    }
+
     /// 更新探测结果
     pub fn update_probe_result(
         &mut self, 

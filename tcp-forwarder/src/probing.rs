@@ -11,7 +11,7 @@ use tracing::{debug, info, warn, error, instrument};
 pub async fn probing_task(
     score_board: ScoreBoard,
     config: RemotesConfig,
-) {
+) -> anyhow::Result<()> {
     info!("启动IP探测任务，间隔: {:?}", config.probing.interval);
     
     // 创建一个定时器，按照配置的间隔执行
@@ -36,10 +36,16 @@ pub async fn probing_task(
             // 为每个IP的探测创建单独的任务
             tokio::spawn(async move {
                 let addr = SocketAddr::new(ip, port);
-                probe_single_ip(addr, score_board, &config).await;
+                if let Err(e) = probe_single_ip(addr, score_board, &config).await {
+                    warn!("探测IP {:?} 失败: {}", addr, e);
+                }
             });
         }
     }
+    
+    // 这个函数永远不会返回，但我们需要返回Result类型以符合函数签名
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
 /// 从评分板中选择需要探测的候选IP
@@ -76,7 +82,7 @@ async fn probe_single_ip(
     addr: SocketAddr,
     score_board: ScoreBoard,
     config: &RemotesConfig,
-) {
+) -> anyhow::Result<()> {
     debug!("开始探测IP: {}", addr);
     
     let start_time = Instant::now();
@@ -120,4 +126,6 @@ async fn probe_single_ip(
         // 理论上不应该发生，因为我们是从评分板选择的IP
         error!("探测后无法找到IP: {} 的评分数据", ip);
     }
+    
+    Ok(())
 }

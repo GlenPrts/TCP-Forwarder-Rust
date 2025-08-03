@@ -1,19 +1,22 @@
 mod config;
 mod scorer;
 mod probing;
+mod selector;
 
 use anyhow::{Context, Result};
 use config::{Config};
 use std::path::Path;
 use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
-use std::time::Instant;
+// 删除未使用的导入
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use rand::seq::SliceRandom;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::copy_bidirectional;
 use tracing::{info, warn, error, debug, Level, instrument};
 use tracing_subscriber::EnvFilter;
+use selector::ActiveRemotes;
 
 /// 主函数
 #[tokio::main]
@@ -37,15 +40,30 @@ async fn main() -> Result<()> {
     // 从配置文件加载IP列表
     load_ip_list(&score_board, &config.remotes)?;
     
+    // 创建活跃远程地址列表
+    let active_remotes = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    
     // 启动探测任务
     let probing_score_board = score_board.clone();
     let probing_config = config.remotes.clone();
     tokio::spawn(async move {
-        probing::probing_task(probing_score_board, probing_config).await;
+        if let Err(e) = probing::probing_task(probing_score_board, probing_config).await {
+            error!("探测任务错误: {}", e);
+        }
     });
     
-    // 硬编码一个远程地址（在阶段2中仍使用，但实际上我们已经有了IP列表）
-    let remote_addr = "5.10.214.29:443";
+    // 启动选择器任务
+    let selector_score_board = score_board.clone();
+    let selector_active_remotes = active_remotes.clone();
+    let selector_config = config.remotes.selector.clone();
+    tokio::spawn(async move {
+        if let Err(e) = selector::selector_task(selector_score_board, selector_active_remotes, selector_config).await {
+            error!("选择器任务错误: {}", e);
+        }
+    });
+    
+    // 记录远程端口，用于转发连接
+    let remote_port = config.remotes.default_remote_port;
     
     // 创建TCP监听器
     let listener = TcpListener::bind(config.server.listen_addr)
@@ -67,12 +85,13 @@ async fn main() -> Result<()> {
         
         info!("接受到来自 {} 的连接", client_addr);
         
-        // 使用硬编码的远程地址
-        let remote_addr_clone = remote_addr.to_string();
-        
         // 为每个连接创建新的异步任务处理
+        let ar_clone = active_remotes.clone();
+        let remote_port_clone = remote_port;
+        let score_board_clone = score_board.clone();
+        
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(client_socket, client_addr, &remote_addr_clone).await {
+            if let Err(e) = handle_connection(client_socket, client_addr, ar_clone, score_board_clone, remote_port_clone).await {
                 error!(client_addr = %client_addr, "处理连接时出错: {}", e);
             }
         });
@@ -148,20 +167,41 @@ fn load_ip_list(score_board: &scorer::ScoreBoard, config: &config::RemotesConfig
 }
 
 /// 处理单个客户端连接
-#[instrument(skip(client_socket), fields(remote_addr = %remote_addr))]
+#[instrument(skip(client_socket, active_remotes, score_board))]
 async fn handle_connection(
     mut client_socket: TcpStream, 
-    client_addr: SocketAddr, 
-    remote_addr: &str
+    client_addr: SocketAddr,
+    active_remotes: ActiveRemotes,
+    score_board: scorer::ScoreBoard,
+    remote_port: u16
 ) -> Result<()> {
+    // 从活跃IP列表中选择一个目标IP
+    let selected_ip = select_target_ip(&active_remotes).await?;
+    
+    // 构建完整的远程地址（IP:端口）
+    let remote_addr = format!("{}:{}", selected_ip, remote_port);
+    
     // 记录开始处理连接
     debug!("开始处理来自 {} 的连接，目标地址: {}", client_addr, remote_addr);
     
     // 连接到远程服务器
     let start_time = std::time::Instant::now();
-    let mut remote_socket = TcpStream::connect(remote_addr)
-        .await
-        .context(format!("连接到远程服务器 {} 失败", remote_addr))?;
+    let mut remote_socket = match TcpStream::connect(&remote_addr).await {
+        Ok(socket) => {
+            // 连接成功，更新分数
+            if let Some(mut score_data) = score_board.get_mut(&selected_ip) {
+                score_data.record_success(start_time.elapsed());
+            }
+            socket
+        },
+        Err(e) => {
+            // 连接失败，更新分数
+            if let Some(mut score_data) = score_board.get_mut(&selected_ip) {
+                score_data.record_failure();
+            }
+            return Err(e).context(format!("连接到远程服务器 {} 失败", remote_addr));
+        }
+    };
     
     let connect_time = start_time.elapsed();
     debug!("连接到 {} 成功，耗时: {:?}", remote_addr, connect_time);
@@ -177,10 +217,30 @@ async fn handle_connection(
             Ok(())
         },
         Err(e) => {
-            // 记录错误，但仍然返回Ok，因为这是预期的错误（例如客户端关闭连接）
+            // 记录错误，但仍然返回错误，以便上层处理
             warn!("数据转发过程中连接中断: {}", e);
             Err(e).context("数据转发失败")
         }
+    }
+}
+
+/// 从活跃IP列表中选择一个目标IP
+///
+/// 目前使用简单的随机选择策略，未来可以扩展为更复杂的负载均衡算法
+async fn select_target_ip(active_remotes: &ActiveRemotes) -> Result<IpAddr> {
+    // 获取活跃IP列表的读锁
+    let ips = active_remotes.read().await;
+    
+    // 检查列表是否为空
+    if ips.is_empty() {
+        return Err(anyhow::anyhow!("没有可用的活跃IP"));
+    }
+    
+    // 使用随机选择策略
+    let mut rng = rand::thread_rng();
+    match ips.choose(&mut rng) {
+        Some(ip) => Ok(*ip),
+        None => Err(anyhow::anyhow!("无法选择目标IP")),
     }
 }
 
