@@ -1,7 +1,7 @@
+use dashmap::DashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use dashmap::DashMap;
 
 /// EWMA (指数加权移动平均)实现
 #[derive(Debug, Clone)]
@@ -68,12 +68,12 @@ impl ScoreData {
             ip,
             port,
             latency_ewma: Ewma::new(
-                config.latency.max_acceptable_latency.as_millis() as f64 / 2.0, 
-                config.latency.ewma_alpha
+                config.latency.max_acceptable_latency.as_millis() as f64 / 2.0,
+                config.latency.ewma_alpha,
             ),
             jitter_ewma: Ewma::new(
                 config.jitter.max_acceptable_jitter.as_millis() as f64 / 2.0,
-                config.jitter.ewma_alpha
+                config.jitter.ewma_alpha,
             ),
             success_rate_ewma: Ewma::new(0.5, config.success_rate.ewma_alpha),
             consecutive_failures: 0,
@@ -91,7 +91,7 @@ impl ScoreData {
         let latency_ms = self.latency_ewma.value();
         let base_latency_ms = config.latency.base_latency.as_millis() as f64;
         let max_latency_ms = config.latency.max_acceptable_latency.as_millis() as f64;
-        
+
         let latency_normalized = if latency_ms <= base_latency_ms {
             // 延迟低于基准，满分
             1.0
@@ -107,7 +107,7 @@ impl ScoreData {
         let jitter_ms = self.jitter_ewma.value();
         let base_jitter_ms = config.jitter.base_jitter.as_millis() as f64;
         let max_jitter_ms = config.jitter.max_acceptable_jitter.as_millis() as f64;
-        
+
         let jitter_normalized = if jitter_ms <= base_jitter_ms {
             // 抖动低于基准，满分
             1.0
@@ -123,20 +123,21 @@ impl ScoreData {
         let success_rate_normalized = self.success_rate_ewma.value().clamp(0.0, 1.0);
 
         // 使用权重配置计算加权分数
-        let weighted_score = latency_normalized * config.weights.latency +
-                           jitter_normalized * config.weights.jitter +
-                           success_rate_normalized * config.weights.success_rate;
+        let weighted_score = latency_normalized * config.weights.latency
+            + jitter_normalized * config.weights.jitter
+            + success_rate_normalized * config.weights.success_rate;
 
         // 将加权分数转换为0-100范围（权重之和应该为1.0）
         let base_score = weighted_score * 100.0;
-        
+
         // 应用失败惩罚（从基础分中扣除）
         let score_after_penalty = (base_score - self.failure_penalty).max(0.0);
-        
+
         // 应用历史稳定性奖励（但不超过理论最大分数）
-        let max_possible_score = config.latency.max_score + config.jitter.max_score + config.success_rate.max_score;
+        let max_possible_score =
+            config.latency.max_score + config.jitter.max_score + config.success_rate.max_score;
         let final_score = (score_after_penalty + self.historical_bonus).min(max_possible_score);
-        
+
         // 确保分数在合理范围内
         final_score.clamp(0.0, max_possible_score)
     }
@@ -148,7 +149,7 @@ impl ScoreData {
         const DEFAULT_LATENCY_WEIGHT: f64 = 0.45;
         const DEFAULT_JITTER_WEIGHT: f64 = 0.15;
         const DEFAULT_SUCCESS_RATE_WEIGHT: f64 = 0.40;
-        
+
         // 延迟分数：延迟越低分数越高
         // 假设理想延迟是50ms，最大可接受延迟是500ms
         let latency_ms = self.latency_ewma.value();
@@ -159,7 +160,7 @@ impl ScoreData {
         } else {
             (500.0 - latency_ms) / (500.0 - 50.0)
         };
-        
+
         // 抖动分数：抖动越低分数越高
         // 假设理想抖动是10ms，最大可接受抖动是80ms
         let jitter_ms = self.jitter_ewma.value();
@@ -170,22 +171,22 @@ impl ScoreData {
         } else {
             (80.0 - jitter_ms) / (80.0 - 10.0)
         };
-        
+
         // 成功率分数（已经在0-1范围内）
         let success_rate_normalized = self.success_rate_ewma.value().clamp(0.0, 1.0);
-        
+
         // 使用权重计算加权分数
-        let weighted_score = latency_normalized * DEFAULT_LATENCY_WEIGHT +
-                           jitter_normalized * DEFAULT_JITTER_WEIGHT +
-                           success_rate_normalized * DEFAULT_SUCCESS_RATE_WEIGHT;
-        
+        let weighted_score = latency_normalized * DEFAULT_LATENCY_WEIGHT
+            + jitter_normalized * DEFAULT_JITTER_WEIGHT
+            + success_rate_normalized * DEFAULT_SUCCESS_RATE_WEIGHT;
+
         // 转换为0-100范围
         let base_score = weighted_score * 100.0;
-        
+
         // 应用惩罚和奖励
         let score_after_penalty = (base_score - self.failure_penalty).max(0.0);
         let final_score = (score_after_penalty + self.historical_bonus).min(100.0);
-        
+
         // 确保分数在0-100范围内
         final_score.clamp(0.0, 100.0)
     }
@@ -195,7 +196,7 @@ impl ScoreData {
         let latency_ms = self.latency_ewma.value();
         let base_latency_ms = config.latency.base_latency.as_millis() as f64;
         let max_latency_ms = config.latency.max_acceptable_latency.as_millis() as f64;
-        
+
         let latency_normalized = if latency_ms <= base_latency_ms {
             1.0
         } else if latency_ms >= max_latency_ms {
@@ -208,7 +209,7 @@ impl ScoreData {
         let jitter_ms = self.jitter_ewma.value();
         let base_jitter_ms = config.jitter.base_jitter.as_millis() as f64;
         let max_jitter_ms = config.jitter.max_acceptable_jitter.as_millis() as f64;
-        
+
         let jitter_normalized = if jitter_ms <= base_jitter_ms {
             1.0
         } else if jitter_ms >= max_jitter_ms {
@@ -219,12 +220,16 @@ impl ScoreData {
         let jitter_score = jitter_normalized * config.jitter.max_score * config.weights.jitter;
 
         let success_rate = self.success_rate_ewma.value().clamp(0.0, 1.0);
-        let success_score = success_rate * config.success_rate.max_score * config.weights.success_rate;
+        let success_score =
+            success_rate * config.success_rate.max_score * config.weights.success_rate;
 
         let base_score = latency_score + jitter_score + success_score;
         let score_after_penalty = (base_score - self.failure_penalty).max(0.0);
-        let max_possible_score = config.latency.max_score + config.jitter.max_score + config.success_rate.max_score;
-        let final_score = (score_after_penalty + self.historical_bonus).min(max_possible_score).clamp(0.0, max_possible_score);
+        let max_possible_score =
+            config.latency.max_score + config.jitter.max_score + config.success_rate.max_score;
+        let final_score = (score_after_penalty + self.historical_bonus)
+            .min(max_possible_score)
+            .clamp(0.0, max_possible_score);
 
         ScoreDetails {
             ip: self.ip,
@@ -251,14 +256,14 @@ impl ScoreData {
         let latency_ms = latency.as_millis() as f64;
         let old_latency = self.latency_ewma.value();
         let jitter = (latency_ms - old_latency).abs();
-        
+
         self.latency_ewma.update(latency_ms);
         self.jitter_ewma.update(jitter);
-        
+
         self.consecutive_failures = 0;
         self.consecutive_successes += 1;
     }
-    
+
     /// 记录连接失败
     pub fn record_failure(&mut self) {
         // 简化版的失败记录，用于实际转发连接
@@ -269,68 +274,70 @@ impl ScoreData {
 
     /// 更新探测结果
     pub fn update_probe_result(
-        &mut self, 
-        success: bool, 
-        latency: Option<Duration>, 
-        config: &crate::config::ScoringConfig
+        &mut self,
+        success: bool,
+        latency: Option<Duration>,
+        config: &crate::config::ScoringConfig,
     ) {
         self.last_probed = Some(Instant::now());
-        
+
         if success {
             // 成功连接
             // 更新成功率
             self.success_rate_ewma.update(1.0);
-            
+
             // 更新延迟和抖动（如果有测量值）
             if let Some(latency) = latency {
                 let latency_ms = latency.as_millis() as f64;
-                
+
                 // 计算抖动：当前延迟与平均延迟的差异绝对值
                 let old_latency = self.latency_ewma.value();
                 let jitter = (latency_ms - old_latency).abs();
-                
+
                 // 更新延迟和抖动EWMA
                 self.latency_ewma.update(latency_ms);
                 self.jitter_ewma.update(jitter);
             }
-            
+
             // 恢复失败惩罚（如果有）
             if self.failure_penalty > 0.0 {
-                self.failure_penalty = (self.failure_penalty - config.failure_penalty.recovery_per_check).max(0.0);
+                self.failure_penalty =
+                    (self.failure_penalty - config.failure_penalty.recovery_per_check).max(0.0);
             }
-            
+
             // 更新连续成功/失败计数
             self.consecutive_failures = 0;
             self.consecutive_successes += 1;
-            
+
             // 更新历史奖励
             if self.consecutive_successes % config.historical_bonus.checks_per_point == 0 {
-                let new_bonus = (self.historical_bonus + 1.0).min(config.historical_bonus.max_bonus);
+                let new_bonus =
+                    (self.historical_bonus + 1.0).min(config.historical_bonus.max_bonus);
                 self.historical_bonus = new_bonus;
             }
         } else {
             // 连接失败
             // 更新成功率
             self.success_rate_ewma.update(0.0);
-            
+
             // 更新连续失败计数并计算惩罚
             self.consecutive_failures += 1;
             self.consecutive_successes = 0;
-            
+
             // 应用失败惩罚：按指数增长
             let base_penalty = config.failure_penalty.base_penalty;
             let factor = config.failure_penalty.exponent_factor;
             let max_penalty = config.failure_penalty.max_penalty;
-            
+
             // 惩罚 = 基础惩罚 * (因子 ^ (连续失败次数 - 1))
             let penalty = if self.consecutive_failures == 1 {
                 base_penalty
             } else {
                 base_penalty * factor.powi((self.consecutive_failures - 1) as i32)
             };
-            
+
             self.failure_penalty = penalty.min(max_penalty);
-            
+
             // 连续失败次数过多时，重置历史奖励
             if self.consecutive_failures >= 5 {
                 self.historical_bonus = 0.0;

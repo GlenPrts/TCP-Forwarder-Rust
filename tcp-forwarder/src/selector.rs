@@ -8,8 +8,8 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::config::SelectorConfig;
-use crate::scorer::ScoreBoard;
 use crate::metrics::METRICS;
+use crate::scorer::ScoreBoard;
 
 /// 活跃远程地址集合，用于存储当前被选为最优的IP地址列表
 pub type ActiveRemotes = Arc<RwLock<Vec<IpAddr>>>;
@@ -39,15 +39,25 @@ pub async fn selector_task(
 ) -> Result<()> {
     // 创建周期性定时器，间隔由配置决定
     let mut interval_timer = interval(config.evaluation_interval);
-    
+
     // 记录上次评估时间，用于实现防抖策略
     let mut last_change_time = Instant::now();
-    
-    info!("选择器任务已启动，评估间隔: {:?}", config.evaluation_interval);
-    
+
+    info!(
+        "选择器任务已启动，评估间隔: {:?}",
+        config.evaluation_interval
+    );
+
     // 在启动时立即执行一次评估，不等待，确保在TCP服务器启动前就有活跃IP
     debug!("执行启动时的初始IP选择评估");
-    match evaluate_and_select(&score_board, &active_remotes, &config, &mut last_change_time).await {
+    match evaluate_and_select(
+        &score_board,
+        &active_remotes,
+        &config,
+        &mut last_change_time,
+    )
+    .await
+    {
         Ok(change_event) => {
             if !change_event.added.is_empty() || !change_event.removed.is_empty() {
                 info!(
@@ -58,13 +68,13 @@ pub async fn selector_task(
                 );
                 debug!("添加: {:?}", change_event.added);
                 debug!("移除: {:?}", change_event.removed);
-                
+
                 // 记录活跃IP数量指标
                 let total_active = change_event.added.len() + change_event.unchanged.len();
                 METRICS.record_active_ips(total_active as f64);
             } else {
                 info!("初始活跃IP设置: {} 个IP", change_event.unchanged.len());
-                if change_event.unchanged.len() > 0 {
+                if !change_event.unchanged.is_empty() {
                     METRICS.record_active_ips(change_event.unchanged.len() as f64);
                 }
             }
@@ -73,7 +83,7 @@ pub async fn selector_task(
             warn!("初始IP评估时发生错误: {}", e);
         }
     }
-    
+
     // 等待2秒让系统稳定，然后开始周期性评估
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -84,7 +94,7 @@ pub async fn selector_task(
     //             change_event.added.len()
     //         );
     //         debug!("初始活跃IP: {:?}", change_event.added);
-            
+
     //         // 记录活跃IP数量指标
     //         METRICS.record_active_ips(change_event.added.len() as f64);
     //     }
@@ -96,7 +106,14 @@ pub async fn selector_task(
     // 周期性执行选择逻辑
     loop {
         // 执行评估和选择逻辑
-        match evaluate_and_select(&score_board, &active_remotes, &config, &mut last_change_time).await {
+        match evaluate_and_select(
+            &score_board,
+            &active_remotes,
+            &config,
+            &mut last_change_time,
+        )
+        .await
+        {
             Ok(change_event) => {
                 if !change_event.added.is_empty() || !change_event.removed.is_empty() {
                     info!(
@@ -107,12 +124,15 @@ pub async fn selector_task(
                     );
                     debug!("添加: {:?}", change_event.added);
                     debug!("移除: {:?}", change_event.removed);
-                    
+
                     // 记录活跃IP数量指标
                     let total_active = change_event.added.len() + change_event.unchanged.len();
                     METRICS.record_active_ips(total_active as f64);
                 } else {
-                    debug!("活跃IP列表未变化，当前有 {} 个活跃IP", change_event.unchanged.len());
+                    debug!(
+                        "活跃IP列表未变化，当前有 {} 个活跃IP",
+                        change_event.unchanged.len()
+                    );
                 }
             }
             Err(e) => {
@@ -144,46 +164,46 @@ async fn evaluate_and_select(
         .iter()
         .map(|entry| (*entry.key(), entry.value().total_score()))
         .collect();
-    
+
     // 按分数从高到低排序
     scored_ips.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    
+
     // 记录前几个IP的分数用于调试
     debug!("IP评分情况（前10个）:");
     for (i, (ip, score)) in scored_ips.iter().take(10).enumerate() {
         debug!("  #{}: {} 分数: {:.2}", i + 1, ip, score);
     }
-    
+
     // 应用最低分数阈值过滤
     let qualified_ips: Vec<IpAddr> = scored_ips
         .iter()
         .filter(|(_, score)| *score >= config.min_score_threshold)
         .map(|(ip, _)| *ip)
         .collect();
-    
+
     info!(
-        "符合最低分数要求的IP: {}/{} (阈值: {:.1})", 
-        qualified_ips.len(), 
+        "符合最低分数要求的IP: {}/{} (阈值: {:.1})",
+        qualified_ips.len(),
         scored_ips.len(),
         config.min_score_threshold
     );
-    
+
     // 确定要选择的IP数量，不超过配置的最大数量和合格IP总数
-    let target_size = std::cmp::min(config.active_set_size as usize, qualified_ips.len());
-    
+    let target_size = std::cmp::min(config.active_set_size, qualified_ips.len());
+
     // 选择前N个高分IP
     let candidate_ips: Vec<IpAddr> = qualified_ips.into_iter().take(target_size).collect();
-    
+
     // 获取当前活跃IP列表
     let current_active = active_remotes.read().await;
     let current_active_set: Vec<IpAddr> = current_active.clone();
     drop(current_active); // 释放读锁
-    
+
     // 计算需要添加和移除的IP
     let mut added: Vec<IpAddr> = Vec::new();
     let mut removed: Vec<IpAddr> = Vec::new();
     let mut unchanged: Vec<IpAddr> = Vec::new();
-    
+
     // 找出需要添加的新IP
     for ip in &candidate_ips {
         if !current_active_set.contains(ip) {
@@ -192,30 +212,32 @@ async fn evaluate_and_select(
             unchanged.push(*ip);
         }
     }
-    
+
     // 找出需要移除的旧IP
     for ip in &current_active_set {
         if !candidate_ips.contains(ip) {
             removed.push(*ip);
         }
     }
-    
+
     // 应用防抖策略
     // 如果距离上次变更时间不足防抖时间，且变更不重要，则取消此次变更
     let now = Instant::now();
     let time_since_last_change = now.duration_since(*last_change_time);
-    
+
     // 如果有变更且配置了防抖
-    if (!added.is_empty() || !removed.is_empty()) && config.switching.debounce_interval > Duration::from_secs(0) {
+    if (!added.is_empty() || !removed.is_empty())
+        && config.switching.debounce_interval > Duration::from_secs(0)
+    {
         // 评估变更是否重要（分数差异是否超过阈值）
-        let is_significant_change = is_change_significant(score_board, &candidate_ips, &current_active_set, config);
-        
+        let is_significant_change =
+            is_change_significant(score_board, &candidate_ips, &current_active_set, config);
+
         // 如果变更不重要且未超过防抖时间，则取消此次变更
         if !is_significant_change && time_since_last_change < config.switching.debounce_interval {
             debug!(
                 "由于防抖策略，取消此次变更 (上次变更: {:?} 前，阈值: {:?})",
-                time_since_last_change,
-                config.switching.debounce_interval
+                time_since_last_change, config.switching.debounce_interval
             );
             return Ok(IpChangeEvent {
                 added: Vec::new(),
@@ -224,13 +246,13 @@ async fn evaluate_and_select(
             });
         }
     }
-    
+
     // 如果存在变更，更新活跃IP列表
     if !added.is_empty() || !removed.is_empty() {
         let mut active = active_remotes.write().await;
         *active = candidate_ips.clone();
         *last_change_time = now; // 更新上次变更时间
-        
+
         // 更新被选中的IP的最后选择时间
         for ip in &candidate_ips {
             if let Some(mut score_data) = score_board.get_mut(ip) {
@@ -238,7 +260,7 @@ async fn evaluate_and_select(
             }
         }
     }
-    
+
     Ok(IpChangeEvent {
         added,
         removed,
@@ -264,17 +286,17 @@ fn is_change_significant(
     if config.switching.score_improvement_threshold <= 0.0 {
         return true;
     }
-    
+
     // 计算新IP集合的平均分
     let new_avg_score = calculate_avg_score(score_board, new_ips);
-    
+
     // 计算当前IP集合的平均分
     let current_avg_score = calculate_avg_score(score_board, current_ips);
-    
+
     // 如果新集合分数显著高于当前集合分数，则视为重要变更
     let improvement = new_avg_score - current_avg_score;
     let is_significant = improvement >= config.switching.score_improvement_threshold;
-    
+
     debug!(
         "分数变化评估: 新集合 ({:.2}) vs 当前集合 ({:.2}), 差异: {:.2}, 阈值: {:.2}, 判定为{}重要变更",
         new_avg_score,
@@ -283,7 +305,7 @@ fn is_change_significant(
         config.switching.score_improvement_threshold,
         if is_significant { "" } else { "不" }
     );
-    
+
     is_significant
 }
 
@@ -297,11 +319,11 @@ fn calculate_avg_score(score_board: &ScoreBoard, ips: &[IpAddr]) -> f64 {
     if ips.is_empty() {
         return 0.0;
     }
-    
+
     let total_score: f64 = ips
         .iter()
         .filter_map(|ip| score_board.get(ip).map(|entry| entry.total_score()))
         .sum();
-    
+
     total_score / ips.len() as f64
 }

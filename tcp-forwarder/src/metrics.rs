@@ -1,15 +1,15 @@
 use anyhow::Result;
-use axum::{response::Response, routing::get, Router};
-use metrics::{counter, gauge, histogram, describe_counter, describe_gauge, describe_histogram};
+use axum::{Router, response::Response, routing::get};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use tokio::sync::RwLock;
 
 /// 全局指标管理器实例
 pub static METRICS: MetricsManager = MetricsManager::new();
@@ -52,7 +52,9 @@ impl MetricsManager {
         register_metrics();
 
         // 存储handle
-        self.handle.set(handle).map_err(|_| anyhow::anyhow!("指标系统已初始化"))?;
+        self.handle
+            .set(handle)
+            .map_err(|_| anyhow::anyhow!("指标系统已初始化"))?;
         *initialized = true;
 
         Ok(())
@@ -60,27 +62,27 @@ impl MetricsManager {
 
     /// 启动指标HTTP服务器
     pub async fn start_server(&self, listen_addr: SocketAddr, path: String) -> Result<()> {
-        let handle = self.handle.get()
+        let handle = self
+            .handle
+            .get()
             .ok_or_else(|| anyhow::anyhow!("指标系统未初始化"))?
             .clone();
-        
+
         // 创建路由
         let app = Router::new()
-            .route(&path, get(move || async move {
-                metrics_handler(handle).await
-            }))
-            .layer(
-                ServiceBuilder::new()
-                    .layer(CorsLayer::permissive())
-            );
+            .route(
+                &path,
+                get(move || async move { metrics_handler(handle).await }),
+            )
+            .layer(ServiceBuilder::new().layer(CorsLayer::permissive()));
 
         info!("指标服务器启动在 http://{}{}", listen_addr, path);
-        
+
         // 绑定并启动服务器
         let listener = tokio::net::TcpListener::bind(listen_addr)
             .await
             .map_err(|e| anyhow::anyhow!("无法绑定指标服务器地址: {}", e))?;
-            
+
         axum::serve(listener, app)
             .await
             .map_err(|e| anyhow::anyhow!("指标服务器运行错误: {}", e))?;
@@ -222,11 +224,18 @@ impl MetricsManager {
     }
 
     /// 记录详细连接池统计
-    pub fn record_pool_statistics(&self, ip: String, total: usize, available: usize, active: usize) {
+    pub fn record_pool_statistics(
+        &self,
+        ip: String,
+        total: usize,
+        available: usize,
+        active: usize,
+    ) {
         gauge!("tcp_forwarder_pool_total_connections", "ip" => ip.clone()).set(total as f64);
-        gauge!("tcp_forwarder_pool_available_connections", "ip" => ip.clone()).set(available as f64);
+        gauge!("tcp_forwarder_pool_available_connections", "ip" => ip.clone())
+            .set(available as f64);
         gauge!("tcp_forwarder_pool_active_connections", "ip" => ip.clone()).set(active as f64);
-        
+
         // 计算利用率
         if total > 0 {
             let utilization = (active as f64 / total as f64) * 100.0;
@@ -257,41 +266,56 @@ fn register_metrics() {
     describe_counter!("tcp_forwarder_connections_successful", "成功连接数");
     describe_counter!("tcp_forwarder_connections_failed", "失败连接数");
     describe_gauge!("tcp_forwarder_active_connections", "当前活跃连接数");
-    
+
     // 连接池相关指标
     describe_gauge!("tcp_forwarder_pool_connections", "连接池中的连接数");
     describe_counter!("tcp_forwarder_pool_hits", "连接池命中次数");
     describe_counter!("tcp_forwarder_pool_misses", "连接池未命中次数");
     describe_counter!("tcp_forwarder_pool_connections_created", "连接池创建连接数");
-    describe_counter!("tcp_forwarder_pool_connections_failed", "连接池创建连接失败数");
+    describe_counter!(
+        "tcp_forwarder_pool_connections_failed",
+        "连接池创建连接失败数"
+    );
     describe_counter!("tcp_forwarder_pool_connections_reused", "连接池重用连接数");
     describe_counter!("tcp_forwarder_pool_connections_closed", "连接池关闭连接数");
-    describe_counter!("tcp_forwarder_pool_health_checks_passed", "连接池健康检查通过数");
-    describe_counter!("tcp_forwarder_pool_health_checks_failed", "连接池健康检查失败数");
-    
+    describe_counter!(
+        "tcp_forwarder_pool_health_checks_passed",
+        "连接池健康检查通过数"
+    );
+    describe_counter!(
+        "tcp_forwarder_pool_health_checks_failed",
+        "连接池健康检查失败数"
+    );
+
     // 动态连接池伸缩指标
     describe_counter!("tcp_forwarder_pool_scale_up_total", "连接池扩容次数");
     describe_counter!("tcp_forwarder_pool_scale_down_total", "连接池缩容次数");
     describe_gauge!("tcp_forwarder_pool_last_scale_up_count", "上次扩容连接数");
     describe_gauge!("tcp_forwarder_pool_last_scale_down_count", "上次缩容连接数");
     describe_gauge!("tcp_forwarder_pool_total_connections", "连接池总连接数");
-    describe_gauge!("tcp_forwarder_pool_available_connections", "连接池可用连接数");
+    describe_gauge!(
+        "tcp_forwarder_pool_available_connections",
+        "连接池可用连接数"
+    );
     describe_gauge!("tcp_forwarder_pool_active_connections", "连接池活跃连接数");
-    describe_gauge!("tcp_forwarder_pool_utilization_percent", "连接池利用率百分比");
+    describe_gauge!(
+        "tcp_forwarder_pool_utilization_percent",
+        "连接池利用率百分比"
+    );
     describe_gauge!("tcp_forwarder_pool_peak_concurrency", "连接池峰值并发数");
-    
+
     // IP和评分相关指标
     describe_gauge!("tcp_forwarder_active_ips", "活跃IP数量");
     describe_gauge!("tcp_forwarder_ip_score", "IP评分");
     describe_counter!("tcp_forwarder_ip_probes_total", "IP探测总数");
     describe_counter!("tcp_forwarder_ip_probes_successful", "IP探测成功数");
     describe_counter!("tcp_forwarder_ip_probes_failed", "IP探测失败数");
-    
+
     // 延迟相关指标
     describe_histogram!("tcp_forwarder_connection_duration_seconds", "连接建立耗时");
     describe_histogram!("tcp_forwarder_probe_duration_seconds", "探测耗时");
     describe_histogram!("tcp_forwarder_transfer_bytes", "传输字节数");
-    
+
     // 系统指标
     describe_gauge!("tcp_forwarder_uptime_seconds", "运行时间（秒）");
     describe_counter!("tcp_forwarder_errors_total", "错误总数");

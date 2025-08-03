@@ -1,14 +1,14 @@
 use anyhow::Result;
+use rand::prelude::*;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 use tracing::{debug, trace};
-use rand::prelude::*;
 
-use crate::selector::ActiveRemotes;
 use crate::pools::PoolManager;
+use crate::selector::ActiveRemotes;
 
 /// 负载均衡算法枚举
 #[derive(Debug, Clone, PartialEq)]
@@ -55,7 +55,8 @@ impl LoadBalancerState {
     /// 获取或创建IP的连接计数器
     pub async fn get_connection_counter(&self, ip: IpAddr) -> Arc<AtomicUsize> {
         let mut counts = self.connection_counts.write().await;
-        counts.entry(ip)
+        counts
+            .entry(ip)
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
             .clone()
     }
@@ -64,7 +65,11 @@ impl LoadBalancerState {
     pub async fn increment_connection(&self, ip: IpAddr) {
         let counter = self.get_connection_counter(ip).await;
         counter.fetch_add(1, Ordering::Relaxed);
-        trace!("IP {} 连接数增加，当前: {}", ip, counter.load(Ordering::Relaxed));
+        trace!(
+            "IP {} 连接数增加，当前: {}",
+            ip,
+            counter.load(Ordering::Relaxed)
+        );
     }
 
     /// 减少连接计数
@@ -73,14 +78,19 @@ impl LoadBalancerState {
         let current = counter.load(Ordering::Relaxed);
         if current > 0 {
             counter.fetch_sub(1, Ordering::Relaxed);
-            trace!("IP {} 连接数减少，当前: {}", ip, counter.load(Ordering::Relaxed));
+            trace!(
+                "IP {} 连接数减少，当前: {}",
+                ip,
+                counter.load(Ordering::Relaxed)
+            );
         }
     }
 
     /// 获取IP的当前连接数
     pub async fn get_connection_count(&self, ip: IpAddr) -> usize {
         let counts = self.connection_counts.read().await;
-        counts.get(&ip)
+        counts
+            .get(&ip)
             .map(|counter| counter.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
@@ -89,7 +99,7 @@ impl LoadBalancerState {
     pub async fn cleanup_inactive_ips(&self, active_ips: &[IpAddr]) {
         let mut counts = self.connection_counts.write().await;
         let active_set: std::collections::HashSet<_> = active_ips.iter().collect();
-        
+
         counts.retain(|ip, _| active_set.contains(ip));
         debug!("清理负载均衡器状态，保留 {} 个活跃IP", counts.len());
     }
@@ -117,26 +127,22 @@ impl LoadBalancer {
         _pool_manager: Option<&PoolManager>, // 可用于获取更精确的连接统计信息
     ) -> Result<IpAddr> {
         let ips = active_remotes.read().await;
-        
+
         if ips.is_empty() {
             return Err(anyhow::anyhow!("没有可用的活跃IP"));
         }
 
         let selected_ip = match self.algorithm {
-            LoadBalanceAlgorithm::LeastConnections => {
-                self.select_least_connections(&ips).await
-            }
-            LoadBalanceAlgorithm::RoundRobin => {
-                self.select_round_robin(&ips).await
-            }
-            LoadBalanceAlgorithm::Random => {
-                self.select_random(&ips).await
-            }
+            LoadBalanceAlgorithm::LeastConnections => self.select_least_connections(&ips).await,
+            LoadBalanceAlgorithm::RoundRobin => self.select_round_robin(&ips).await,
+            LoadBalanceAlgorithm::Random => self.select_random(&ips).await,
         };
 
         debug!(
             "使用 {:?} 算法选择目标IP: {}, 候选数量: {}",
-            self.algorithm, selected_ip, ips.len()
+            self.algorithm,
+            selected_ip,
+            ips.len()
         );
 
         Ok(selected_ip)
@@ -172,7 +178,9 @@ impl LoadBalancer {
 
         trace!(
             "轮询算法选择 IP: {}, 索引: {}/{}",
-            selected_ip, selected_index, ips.len()
+            selected_ip,
+            selected_index,
+            ips.len()
         );
 
         selected_ip
@@ -220,11 +228,11 @@ impl LoadBalancer {
     pub async fn get_connection_stats(&self) -> HashMap<IpAddr, usize> {
         let mut stats = HashMap::new();
         let counts = self.state.connection_counts.read().await;
-        
+
         for (&ip, counter) in counts.iter() {
             stats.insert(ip, counter.load(Ordering::Relaxed));
         }
-        
+
         stats
     }
 }
@@ -235,21 +243,24 @@ pub async fn load_balancer_manager_task(
     active_remotes: ActiveRemotes,
 ) {
     let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(30));
-    
+
     loop {
         cleanup_interval.tick().await;
-        
+
         // 获取当前活跃IP列表
         let active_ips = {
             let ips = active_remotes.read().await;
             ips.clone()
         };
-        
+
         // 清理不活跃的IP统计信息
         load_balancer.cleanup_inactive_ips(&active_ips).await;
-        
+
         // 如果是最少连接数算法，定期输出统计信息
-        if matches!(load_balancer.algorithm, LoadBalanceAlgorithm::LeastConnections) {
+        if matches!(
+            load_balancer.algorithm,
+            LoadBalanceAlgorithm::LeastConnections
+        ) {
             let stats = load_balancer.get_connection_stats().await;
             if !stats.is_empty() {
                 debug!("负载均衡器连接统计: {:?}", stats);
@@ -261,7 +272,7 @@ pub async fn load_balancer_manager_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, IpAddr};
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[tokio::test]
     async fn test_least_connections_selection() {
@@ -278,7 +289,7 @@ mod tests {
 
         // 增加第一个IP的连接数
         lb.state.increment_connection(ips[0]).await;
-        
+
         // 现在应该选择第二个IP
         let selected = lb.select_least_connections(&ips).await;
         assert_eq!(selected, ips[1]);

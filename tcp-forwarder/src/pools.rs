@@ -1,21 +1,21 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use dashmap::DashMap;
 use futures::future::try_join_all;
-use socket2::{TcpKeepalive};
+use socket2::TcpKeepalive;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::time::{interval, Duration};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::time::{Duration, interval};
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::config::PoolCommonConfig;
 
-use crate::config::{RemotesConfig, DynamicStrategyConfig, ScalingConfig};
+use crate::config::{DynamicStrategyConfig, RemotesConfig, ScalingConfig};
 use crate::metrics::METRICS;
 use crate::scorer::ScoreBoard;
 use crate::selector::ActiveRemotes;
@@ -54,11 +54,11 @@ impl PoolStats {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
         self.available_connections.fetch_sub(1, Ordering::Relaxed);
         self.connection_requests.fetch_add(1, Ordering::Relaxed);
-        
+
         // 更新峰值并发历史
         let current_active = self.active_connections.load(Ordering::Relaxed);
         let mut history = self.peak_concurrency_history.write().await;
-        
+
         // 保持最近100个记录
         if history.len() >= 100 {
             history.pop_front();
@@ -163,9 +163,9 @@ pub struct PoolState {
 impl PoolState {
     /// 创建新的连接池状态
     pub fn new(
-        buffer_size: usize, 
+        buffer_size: usize,
         dynamic_config: Option<Arc<DynamicStrategyConfig>>,
-        common_config: Arc<PoolCommonConfig>
+        common_config: Arc<PoolCommonConfig>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(buffer_size);
         Self {
@@ -242,69 +242,85 @@ async fn dynamic_scaling_task(
     dynamic_config: Arc<DynamicStrategyConfig>,
 ) {
     info!("启动动态伸缩任务，IP: {}", ip);
-    
+
     let mut interval = interval(dynamic_config.scaling.interval);
-    
+
     while pool_state.is_active().await {
         interval.tick().await;
-        
+
         // 计算目标连接池大小
-        let target_size = pool_state.stats.calculate_target_size(&dynamic_config.scaling).await;
+        let target_size = pool_state
+            .stats
+            .calculate_target_size(&dynamic_config.scaling)
+            .await;
         let current_total = pool_state.stats.total_connections.load(Ordering::Relaxed);
-        let current_available = pool_state.stats.available_connections.load(Ordering::Relaxed);
+        let current_available = pool_state
+            .stats
+            .available_connections
+            .load(Ordering::Relaxed);
         let current_active = pool_state.stats.active_connections.load(Ordering::Relaxed);
-        
+
         // 应用min/max限制
         let target_size = target_size.clamp(dynamic_config.min_size, dynamic_config.max_size);
-        
+
         debug!(
             "动态伸缩检查 - IP: {}, 当前总数: {}, 可用: {}, 活跃: {}, 目标: {}",
             ip, current_total, current_available, current_active, target_size
         );
-        
+
         // 检查是否需要伸缩
         let mut last_scaling_time = pool_state.stats.last_scaling_time.write().await;
         let time_since_last_scaling = last_scaling_time.elapsed();
-        
+
         // 防止过于频繁的伸缩操作（至少间隔1秒）
         if time_since_last_scaling < Duration::from_secs(1) {
             continue;
         }
-        
+
         if target_size > current_total {
             // 需要扩容
-            let scale_up_count = (target_size - current_total).min(dynamic_config.scaling.scale_up_increment);
+            let scale_up_count =
+                (target_size - current_total).min(dynamic_config.scaling.scale_up_increment);
             if scale_up_count > 0 {
                 info!("扩容连接池 - IP: {}, 增加 {} 个连接", ip, scale_up_count);
                 scale_up_pool(ip, port, &pool_state, scale_up_count).await;
                 *last_scaling_time = Instant::now();
-                
+
                 // 记录指标
                 METRICS.record_pool_scaled_up(ip.to_string(), scale_up_count);
                 METRICS.record_pool_size(&ip.to_string(), (current_total + scale_up_count) as f64);
             }
-        } else if target_size < current_total && current_available > dynamic_config.scaling.scale_down_increment {
+        } else if target_size < current_total
+            && current_available > dynamic_config.scaling.scale_down_increment
+        {
             // 需要缩容（只有当可用连接数足够时才缩容）
-            let scale_down_count = (current_total - target_size).min(dynamic_config.scaling.scale_down_increment);
+            let scale_down_count =
+                (current_total - target_size).min(dynamic_config.scaling.scale_down_increment);
             if scale_down_count > 0 {
                 info!("缩容连接池 - IP: {}, 减少 {} 个连接", ip, scale_down_count);
                 scale_down_pool(&pool_state, scale_down_count).await;
                 *last_scaling_time = Instant::now();
-                
+
                 // 记录指标
                 METRICS.record_pool_scaled_down(ip.to_string(), scale_down_count);
-                METRICS.record_pool_size(&ip.to_string(), (current_total - scale_down_count) as f64);
+                METRICS
+                    .record_pool_size(&ip.to_string(), (current_total - scale_down_count) as f64);
             }
         }
-        
+
         // 更新池大小指标
-        METRICS.record_pool_statistics(ip.to_string(), current_total, current_available, current_active);
-        
+        METRICS.record_pool_statistics(
+            ip.to_string(),
+            current_total,
+            current_available,
+            current_active,
+        );
+
         // 记录峰值并发指标
         let peak_concurrency = pool_state.stats.get_recent_peak_concurrency().await;
         METRICS.record_pool_peak_concurrency(ip.to_string(), peak_concurrency);
     }
-    
+
     info!("动态伸缩任务停止，IP: {}", ip);
 }
 
@@ -352,7 +368,7 @@ async fn scale_up_pool(ip: IpAddr, port: u16, pool_state: &PoolState, count: usi
 async fn scale_down_pool(pool_state: &PoolState, count: usize) {
     let mut receiver = pool_state.receiver.lock().await;
     let mut removed_count = 0;
-    
+
     // 移除指定数量的空闲连接
     for _ in 0..count {
         if receiver.try_recv().is_ok() {
@@ -363,7 +379,7 @@ async fn scale_down_pool(pool_state: &PoolState, count: usize) {
             break; // 没有更多空闲连接可移除
         }
     }
-    
+
     debug!("缩容：实际移除了 {} 个连接", removed_count);
 }
 
@@ -375,29 +391,28 @@ async fn dynamic_filler_task(
     dynamic_config: Arc<DynamicStrategyConfig>,
 ) {
     info!("启动动态填充任务，IP: {}", ip);
-    
+
     let check_interval = Duration::from_millis(500); // 更频繁的检查
     let mut interval = interval(check_interval);
 
     while pool_state.is_active().await {
         interval.tick().await;
 
-        let current_available = pool_state.stats.available_connections.load(Ordering::Relaxed);
+        let current_available = pool_state
+            .stats
+            .available_connections
+            .load(Ordering::Relaxed);
         let current_total = pool_state.stats.total_connections.load(Ordering::Relaxed);
-        
+
         // 确保至少有最小数量的连接
         let min_needed = dynamic_config.min_size.saturating_sub(current_total);
-        
+
         // 检查可用连接是否不足
         let available_threshold = (current_total / 4).max(2); // 至少保持25%或2个可用连接
-        let availability_needed = if current_available < available_threshold {
-            available_threshold - current_available
-        } else {
-            0
-        };
-        
+        let availability_needed = available_threshold.saturating_sub(current_available);
+
         let needed = min_needed.max(availability_needed);
-        
+
         if needed > 0 && current_total < dynamic_config.max_size {
             let create_count = needed.min(dynamic_config.max_size - current_total);
             debug!("动态填充需要补充 {} 个连接到 {}", create_count, ip);
@@ -409,7 +424,8 @@ async fn dynamic_filler_task(
                     let stats = pool_state.stats.clone();
                     let timeout = pool_state.common_config.dial_timeout;
                     tokio::spawn(async move {
-                        match create_connection_with_timeout_and_keepalive(ip, port, timeout).await {
+                        match create_connection_with_timeout_and_keepalive(ip, port, timeout).await
+                        {
                             Ok(stream) => {
                                 let connection = PooledConnection::new(stream);
                                 if sender.send(connection).await.is_ok() {
@@ -527,7 +543,8 @@ async fn filler_task(ip: IpAddr, port: u16, pool_state: PoolState, target_size: 
                     let sender = pool_state.sender.clone();
                     let timeout = pool_state.common_config.dial_timeout;
                     tokio::spawn(async move {
-                        match create_connection_with_timeout_and_keepalive(ip, port, timeout).await {
+                        match create_connection_with_timeout_and_keepalive(ip, port, timeout).await
+                        {
                             Ok(stream) => {
                                 let connection = PooledConnection::new(stream);
                                 if sender.send(connection).await.is_ok() {
@@ -548,12 +565,7 @@ async fn filler_task(ip: IpAddr, port: u16, pool_state: PoolState, target_size: 
 
             // 等待所有连接创建任务完成，但设置超时
             let timeout_duration = Duration::from_secs(10);
-            match tokio::time::timeout(
-                timeout_duration,
-                futures::future::join_all(tasks),
-            )
-            .await
-            {
+            match tokio::time::timeout(timeout_duration, futures::future::join_all(tasks)).await {
                 Ok(_) => {
                     debug!("连接池填充任务完成，目标IP: {}", ip);
                 }
@@ -577,9 +589,9 @@ pub async fn create_connection_with_keepalive(ip: IpAddr, port: u16) -> anyhow::
 
 /// 创建带TCP keepalive和超时的连接
 pub async fn create_connection_with_timeout_and_keepalive(
-    ip: IpAddr, 
-    port: u16, 
-    timeout: Duration
+    ip: IpAddr,
+    port: u16,
+    timeout: Duration,
 ) -> anyhow::Result<TcpStream> {
     let addr = SocketAddr::new(ip, port);
 
@@ -591,7 +603,7 @@ pub async fn create_connection_with_timeout_and_keepalive(
 
     // 获取底层socket并设置keepalive
     let socket = socket2::Socket::from(stream.into_std()?);
-    
+
     // 配置TCP keepalive
     let keepalive = TcpKeepalive::new()
         .with_time(Duration::from_secs(60)) // 60秒后开始发送keepalive
@@ -599,7 +611,7 @@ pub async fn create_connection_with_timeout_and_keepalive(
         .with_retries(3); // 重试3次
 
     socket.set_tcp_keepalive(&keepalive)?;
-    
+
     // 转换回tokio TcpStream
     socket.set_nonblocking(true)?;
     let std_stream: std::net::TcpStream = socket.into();
@@ -625,7 +637,7 @@ pub async fn get_connection_from_pool(
             // 检查连接是否仍然有效
             if is_connection_healthy(&mut connection.stream).await {
                 connection.touch();
-                
+
                 // 更新统计信息
                 pool_state.stats.record_connection_acquired().await;
                 METRICS.record_pool_connection_reused();
@@ -655,7 +667,7 @@ pub async fn return_connection_to_pool(
         let mut conn = connection;
         if is_connection_healthy(&mut conn.stream).await {
             conn.touch();
-            
+
             // 尝试将连接放回池中
             if pool_state.sender.try_send(conn).is_ok() {
                 pool_state.stats.record_connection_released(true);
@@ -672,18 +684,24 @@ pub async fn return_connection_to_pool(
             debug!("连接不健康，丢弃连接: {}", ip);
         }
     }
-    
+
     false
 }
 
 /// 获取连接池统计信息
-pub async fn get_pool_statistics(pool_manager: &PoolManager, ip: IpAddr) -> Option<(usize, usize, usize, usize)> {
+pub async fn get_pool_statistics(
+    pool_manager: &PoolManager,
+    ip: IpAddr,
+) -> Option<(usize, usize, usize, usize)> {
     if let Some(pool_state) = pool_manager.get(&ip) {
         let total = pool_state.stats.total_connections.load(Ordering::Relaxed);
-        let available = pool_state.stats.available_connections.load(Ordering::Relaxed);
+        let available = pool_state
+            .stats
+            .available_connections
+            .load(Ordering::Relaxed);
         let active = pool_state.stats.active_connections.load(Ordering::Relaxed);
         let recent_peak = pool_state.stats.get_recent_peak_concurrency().await;
-        
+
         Some((total, available, active, recent_peak))
     } else {
         None
@@ -714,34 +732,47 @@ pub async fn pool_manager_task(
         // 获取当前活跃的IP列表
         let current_ips = {
             let active_ips = active_remotes.read().await;
-            active_ips.iter().cloned().collect::<std::collections::HashSet<_>>()
+            active_ips
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
         };
 
         // 检查是否有新的IP需要创建连接池
         for ip in &current_ips {
             if !last_known_ips.contains(ip) && !pool_manager.contains_key(ip) {
                 info!("为新的活跃IP {} 创建连接池", ip);
-                
+
                 // 根据策略配置决定池参数
-                let (pool_size, buffer_size, dynamic_config) = match pools_config.strategy.strategy_type.as_str() {
-                    "static" => {
-                        let size = pools_config.strategy.static_.as_ref()
-                            .map(|s| s.size_per_remote)
-                            .unwrap_or(50);
-                        (size, size * 2, None)
-                    }
-                    "dynamic" => {
-                        let config = pools_config.strategy.dynamic.as_ref()
-                            .expect("动态策略配置缺失");
-                        let buffer_size = config.max_size.max(100); // 确保足够的缓冲区
-                        (config.min_size, buffer_size, Some(Arc::new(config.clone())))
-                    }
-                    _ => {
-                        warn!("未知的连接池策略: {}, 使用默认静态策略", pools_config.strategy.strategy_type);
-                        (50, 100, None)
-                    }
-                };
-                
+                let (pool_size, buffer_size, dynamic_config) =
+                    match pools_config.strategy.strategy_type.as_str() {
+                        "static" => {
+                            let size = pools_config
+                                .strategy
+                                .static_
+                                .as_ref()
+                                .map(|s| s.size_per_remote)
+                                .unwrap_or(50);
+                            (size, size * 2, None)
+                        }
+                        "dynamic" => {
+                            let config = pools_config
+                                .strategy
+                                .dynamic
+                                .as_ref()
+                                .expect("动态策略配置缺失");
+                            let buffer_size = config.max_size.max(100); // 确保足够的缓冲区
+                            (config.min_size, buffer_size, Some(Arc::new(config.clone())))
+                        }
+                        _ => {
+                            warn!(
+                                "未知的连接池策略: {}, 使用默认静态策略",
+                                pools_config.strategy.strategy_type
+                            );
+                            (50, 100, None)
+                        }
+                    };
+
                 create_pool_for_ip(
                     *ip,
                     remotes_config.default_remote_port,
@@ -750,7 +781,8 @@ pub async fn pool_manager_task(
                     buffer_size,
                     dynamic_config,
                     Arc::new(pools_config.common.clone()),
-                ).await;
+                )
+                .await;
             }
         }
 
@@ -769,8 +801,11 @@ pub async fn pool_manager_task(
 
         // 输出统计信息
         if !last_known_ips.is_empty() {
-            debug!("连接池管理任务心跳，当前活跃IP数量: {}", last_known_ips.len());
-            
+            debug!(
+                "连接池管理任务心跳，当前活跃IP数量: {}",
+                last_known_ips.len()
+            );
+
             // 定期输出详细统计信息
             for ip in &last_known_ips {
                 if let Some(stats) = get_pool_statistics(&pool_manager, *ip).await {
@@ -798,32 +833,47 @@ pub async fn initialize_pools(
     // 从active_remotes获取当前活跃的IP列表
     let active_ips = active_remotes.read().await;
     let ip_count = active_ips.len();
-    info!("开始初始化连接池，远程数量: {}, 策略: {}", ip_count, pools_config.strategy.strategy_type);
+    info!(
+        "开始初始化连接池，远程数量: {}, 策略: {}",
+        ip_count, pools_config.strategy.strategy_type
+    );
 
     // 根据策略配置决定池参数
-    let (pool_size, buffer_size, dynamic_config) = match pools_config.strategy.strategy_type.as_str() {
-        "static" => {
-            let size = pools_config.strategy.static_.as_ref()
-                .map(|s| s.size_per_remote)
-                .unwrap_or(50);
-            info!("使用静态连接池策略，每个IP连接数: {}", size);
-            (size, size * 2, None)
-        }
-        "dynamic" => {
-            let config = pools_config.strategy.dynamic.as_ref()
-                .expect("动态策略配置缺失");
-            let buffer_size = config.max_size.max(100);
-            info!(
-                "使用动态连接池策略，范围: {}-{}, 缓冲比例: {:.1}%",
-                config.min_size, config.max_size, config.scaling.target_buffer_ratio * 100.0
-            );
-            (config.min_size, buffer_size, Some(Arc::new(config.clone())))
-        }
-        _ => {
-            warn!("未知的连接池策略: {}, 使用默认静态策略", pools_config.strategy.strategy_type);
-            (50, 100, None)
-        }
-    };
+    let (pool_size, buffer_size, dynamic_config) =
+        match pools_config.strategy.strategy_type.as_str() {
+            "static" => {
+                let size = pools_config
+                    .strategy
+                    .static_
+                    .as_ref()
+                    .map(|s| s.size_per_remote)
+                    .unwrap_or(50);
+                info!("使用静态连接池策略，每个IP连接数: {}", size);
+                (size, size * 2, None)
+            }
+            "dynamic" => {
+                let config = pools_config
+                    .strategy
+                    .dynamic
+                    .as_ref()
+                    .expect("动态策略配置缺失");
+                let buffer_size = config.max_size.max(100);
+                info!(
+                    "使用动态连接池策略，范围: {}-{}, 缓冲比例: {:.1}%",
+                    config.min_size,
+                    config.max_size,
+                    config.scaling.target_buffer_ratio * 100.0
+                );
+                (config.min_size, buffer_size, Some(Arc::new(config.clone())))
+            }
+            _ => {
+                warn!(
+                    "未知的连接池策略: {}, 使用默认静态策略",
+                    pools_config.strategy.strategy_type
+                );
+                (50, 100, None)
+            }
+        };
 
     // 为每个远程IP创建连接池
     let pool_creation_tasks: Vec<_> = active_ips
@@ -836,7 +886,16 @@ pub async fn initialize_pools(
             let common_config_clone = Arc::new(pools_config.common.clone());
 
             tokio::spawn(async move {
-                create_pool_for_ip(ip, port, pools, pool_size, buffer_size, dynamic_config_clone, common_config_clone).await;
+                create_pool_for_ip(
+                    ip,
+                    port,
+                    pools,
+                    pool_size,
+                    buffer_size,
+                    dynamic_config_clone,
+                    common_config_clone,
+                )
+                .await;
             })
         })
         .collect();
@@ -847,7 +906,10 @@ pub async fn initialize_pools(
         return Err(anyhow::anyhow!("连接池初始化失败: {}", e));
     }
 
-    info!("连接池初始化完成，策略: {}", pools_config.strategy.strategy_type);
+    info!(
+        "连接池初始化完成，策略: {}",
+        pools_config.strategy.strategy_type
+    );
     Ok(pool_manager)
 }
 

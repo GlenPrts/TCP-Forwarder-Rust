@@ -38,9 +38,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
         working-directory: ./tcp-forwarder 
+
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
         working-directory: ./tcp-forwarder
+        
       - name: Run tests
         run: cargo test --verbose
         working-directory: ./tcp-forwarder
