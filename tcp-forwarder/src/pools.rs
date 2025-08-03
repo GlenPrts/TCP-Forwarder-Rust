@@ -2,6 +2,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use futures::future::try_join_all;
 use socket2::{TcpKeepalive};
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -296,19 +297,52 @@ pub fn create_pool_manager() -> PoolManager {
 pub async fn pool_manager_task(
     pool_manager: PoolManager,
     active_remotes: ActiveRemotes,
-    score_board: ScoreBoard,
+    _score_board: ScoreBoard,
     remotes_config: Arc<crate::config::RemotesConfig>,
-    pools_config: Arc<crate::config::PoolsConfig>,
+    _pools_config: Arc<crate::config::PoolsConfig>,
 ) -> Result<()> {
     info!("启动连接池管理任务");
 
-    // 使用新的initialize_pools函数
-    let _initialized_pools = initialize_pools(&remotes_config, active_remotes, score_board).await?;
+    let mut check_interval = tokio::time::interval(Duration::from_secs(10));
+    let mut last_known_ips = std::collections::HashSet::new();
 
-    // 保持任务运行
     loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        debug!("连接池管理任务心跳");
+        check_interval.tick().await;
+
+        // 获取当前活跃的IP列表
+        let current_ips = {
+            let active_ips = active_remotes.read().await;
+            active_ips.iter().cloned().collect::<std::collections::HashSet<_>>()
+        };
+
+        // 检查是否有新的IP需要创建连接池
+        for ip in &current_ips {
+            if !last_known_ips.contains(ip) && !pool_manager.contains_key(ip) {
+                info!("为新的活跃IP {} 创建连接池", ip);
+                create_pool_for_ip(
+                    *ip,
+                    remotes_config.default_remote_port,
+                    pool_manager.clone(),
+                    5, // 默认池大小
+                    10, // 默认缓冲区大小
+                ).await;
+            }
+        }
+
+        // 检查是否有IP不再活跃，需要清理连接池
+        for ip in &last_known_ips {
+            if !current_ips.contains(ip) {
+                if let Some((_, pool_state)) = pool_manager.remove(ip) {
+                    info!("IP {} 不再活跃，停止其连接池", ip);
+                    pool_state.mark_inactive().await;
+                }
+            }
+        }
+
+        // 更新已知IP列表
+        last_known_ips = current_ips;
+
+        debug!("连接池管理任务心跳，当前活跃IP数量: {}", last_known_ips.len());
     }
 }
 

@@ -7,7 +7,7 @@ headers = {
 
 url = "http://127.0.0.1:1234"
 
-n = 1000
+n = 200
 success_count = 0
 fail_count = 0
 # 使用多线程进行请求

@@ -161,11 +161,16 @@ async fn main() -> Result<()> {
                     // 记录连接结束
                     METRICS.record_connection_closed();
                     
-                    if let Err(e) = result {
-                        error!(client_addr = %client_addr, "处理连接时出错: {}", e);
-                        METRICS.record_connection_failed();
-                    } else {
-                        METRICS.record_connection_success();
+                    // 根据结果记录成功或失败
+                    match result {
+                        Ok(_) => {
+                            debug!(client_addr = %client_addr, "连接正常结束");
+                            METRICS.record_connection_success();
+                        },
+                        Err(e) => {
+                            error!(client_addr = %client_addr, "处理连接时出错: {}", e);
+                            METRICS.record_connection_failed();
+                        }
                     }
                 });
             }

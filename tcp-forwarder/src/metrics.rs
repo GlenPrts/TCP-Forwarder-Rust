@@ -4,6 +4,7 @@ use metrics::{counter, gauge, histogram, describe_counter, describe_gauge, descr
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
@@ -17,6 +18,7 @@ pub static METRICS: MetricsManager = MetricsManager::new();
 pub struct MetricsManager {
     handle: OnceLock<PrometheusHandle>,
     is_initialized: RwLock<bool>,
+    active_connections: AtomicI64,
 }
 
 impl MetricsManager {
@@ -25,6 +27,7 @@ impl MetricsManager {
         Self {
             handle: OnceLock::new(),
             is_initialized: RwLock::const_new(false),
+            active_connections: AtomicI64::new(0),
         }
     }
 
@@ -90,12 +93,14 @@ impl MetricsManager {
     /// 记录新连接
     pub fn record_new_connection(&self) {
         counter!("tcp_forwarder_connections_total", 1);
-        gauge!("tcp_forwarder_active_connections", 1.0);
+        let current = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
+        gauge!("tcp_forwarder_active_connections", current as f64);
     }
 
     /// 记录连接结束
     pub fn record_connection_closed(&self) {
-        gauge!("tcp_forwarder_active_connections", -1.0);
+        let current = self.active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+        gauge!("tcp_forwarder_active_connections", current.max(0) as f64);
     }
 
     /// 记录连接成功
