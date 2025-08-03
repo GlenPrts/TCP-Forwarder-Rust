@@ -1,39 +1,44 @@
+# Dependency Updates
+#
+# 本工作流自动化依赖项更新，包括 Rust 依赖、Docker基础镜像、GitHub Actions。
+# 支持手动触发和定时触发（可解注释 schedule）。
+
 name: Dependency Updates
 
 on:
   # schedule:
-  #   # 每周一 UTC 08:00 运行
-  #   - cron: '0 8 * * 1'
-  workflow_dispatch: # 允许手动触发
+  #   - cron: '0 8 * * 1' # 每周一 UTC 08:00 运行
+  workflow_dispatch:
 
 jobs:
+  # 1. Rust 依赖自动更新
   update-rust-dependencies:
-    name: Update Rust Dependencies
+    name: Rust 依赖自动更新
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-edit
+      - name: 安装 cargo-edit
         run: cargo install cargo-edit
 
-      - name: Update dependencies
+      - name: 升级依赖
         run: |
           cd tcp-forwarder
           cargo upgrade
           cargo update
 
-      - name: Run tests
+      - name: 运行测试
         run: |
           cd tcp-forwarder
           cargo test
 
-      - name: Create Pull Request
+      - name: 创建依赖更新 PR
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -42,43 +47,40 @@ jobs:
           body: |
             ## 📦 依赖项更新
             
-            This PR updates Rust dependencies to their latest versions.
+            本 PR 自动更新 Rust 依赖到最新版本。
             
-            ### 🔍 Changes
-            - Updated Cargo dependencies
-            - Ran `cargo upgrade` and `cargo update`
-            - Verified all tests pass
+            ### 🔍 变更内容
+            - 更新 Cargo 依赖
+            - 执行 `cargo upgrade` 和 `cargo update`
+            - 验证所有测试通过
             
-            ### 🧪 Testing
-            - [x] All existing tests pass
-            - [x] No breaking changes detected
+            ### 🧪 测试
+            - [x] 所有现有测试通过
+            - [x] 未检测到破坏性变更
             
-            This PR was automatically created by the dependency update workflow.
+            本 PR 由依赖更新工作流自动创建。
           branch: update-dependencies
           delete-branch: true
           base: main
 
+  # 2. 检查 Docker 基础镜像更新
   update-docker-base-image:
-    name: Check Docker Base Image Updates
+    name: 检查 Docker 基础镜像更新
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Check for updates
+      - name: 检查基础镜像版本
         id: check
         run: |
-          # 获取当前Dockerfile中的基础镜像版本
           current_rust=$(grep "FROM rust:" Dockerfile | head -1 | cut -d: -f2 | cut -d- -f1)
           current_debian=$(grep "FROM debian:" Dockerfile | tail -1 | cut -d: -f2)
-          
           echo "current_rust=$current_rust" >> $GITHUB_OUTPUT
           echo "current_debian=$current_debian" >> $GITHUB_OUTPUT
-          
-          # 这里可以添加逻辑来检查是否有新版本
           echo "checking for updates..."
 
-      - name: Create issue for manual review
+      - name: 创建手动检查 Issue
         if: steps.check.outputs.current_rust != ''
         uses: actions/github-script@v7
         with:
@@ -99,7 +101,6 @@ jobs:
             - [ ] 更新Dockerfile
             
             此issue由依赖更新工作流自动创建。`;
-            
             // 检查是否已存在类似的issue
             const issues = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -107,11 +108,9 @@ jobs:
               state: 'open',
               labels: 'docker,dependencies'
             });
-            
             const existingIssue = issues.data.find(issue => 
               issue.title.includes('Docker基础镜像检查')
             );
-            
             if (!existingIssue) {
               await github.rest.issues.create({
                 owner: context.repo.owner,
@@ -122,20 +121,21 @@ jobs:
               });
             }
 
+  # 3. GitHub Actions 自动更新
   update-github-actions:
-    name: Update GitHub Actions
+    name: GitHub Actions 自动更新
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Update GitHub Actions versions
+      - name: 自动更新 Actions 版本
         uses: mheap/github-action-auto-update@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: 'chore: update GitHub Actions versions'
 
-      - name: Create Pull Request
+      - name: 创建 Actions 更新 PR
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -144,16 +144,16 @@ jobs:
           body: |
             ## 🔧 GitHub Actions 更新
             
-            This PR updates GitHub Actions to their latest versions.
+            本 PR 自动更新工作流文件中的 Actions 版本。
             
-            ### 🔍 Changes
-            - Updated action versions in workflow files
-            - Ensured compatibility with latest features
+            ### 🔍 变更内容
+            - 更新 workflow 文件中的 action 版本
+            - 确保兼容最新功能
             
-            ### 🧪 Testing
-            This change will be tested when the PR is merged.
+            ### 🧪 测试
+            合并后将自动测试。
             
-            This PR was automatically created by the dependency update workflow.
+            本 PR 由依赖更新工作流自动创建。
           branch: update-github-actions
           delete-branch: true
           base: main

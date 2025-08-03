@@ -1,25 +1,29 @@
 name: Tests
+#
+# 本工作流自动化测试、代码覆盖率、性能基准，支持多平台多 Rust 版本。
+# 支持主分支、开发分支、PR、手动触发。
 
 on:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 1. 多平台多版本测试
   test:
-    name: Test (${{ matrix.os }}, Rust ${{ matrix.rust }})
+    name: 测试 (${{ matrix.os }}, Rust ${{ matrix.rust }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, beta, nightly]
         exclude:
-          # 在Windows和macOS上只测试stable版本以节省CI时间
+          # Windows/macOS 只测 stable 节省CI资源
           - os: windows-latest
             rust: beta
           - os: windows-latest
@@ -28,20 +32,18 @@ jobs:
             rust: beta
           - os: macos-latest
             rust: nightly
-
     runs-on: ${{ matrix.os }}
-    
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust ${{ matrix.rust }}
+      - name: 设置 Rust ${{ matrix.rust }}
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
+      - name: 缓存 Cargo 依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -52,37 +54,38 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.rust }}-cargo-
 
-      - name: Check formatting (stable only)
+      - name: 格式检查 (仅 stable)
         if: matrix.rust == 'stable'
         run: cd tcp-forwarder && cargo fmt --all -- --check
 
-      - name: Run clippy (stable only)
+      - name: Clippy 静态分析 (仅 stable)
         if: matrix.rust == 'stable'
         run: cd tcp-forwarder && cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Build
+      - name: 构建
         run: cd tcp-forwarder && cargo build --verbose
 
-      - name: Run tests
+      - name: 运行单元测试
         run: cd tcp-forwarder && cargo test --verbose
 
-      - name: Run integration tests
+      - name: 运行集成测试
         run: cd tcp-forwarder && cargo test --test integration --verbose
 
+  # 2. 代码覆盖率
   coverage:
-    name: Code Coverage
+    name: 代码覆盖率
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-tarpaulin
+      - name: 安装 cargo-tarpaulin
         run: cargo install cargo-tarpaulin
 
-      - name: Cache cargo registry
+      - name: 缓存 Cargo 依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -91,30 +94,31 @@ jobs:
             tcp-forwarder/target
           key: ${{ runner.os }}-coverage-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Generate coverage report
+      - name: 生成覆盖率报告
         run: |
           cd tcp-forwarder
           cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
 
-      - name: Upload coverage to Codecov
+      - name: 上传覆盖率到 Codecov
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: tcp-forwarder/cobertura.xml
           fail_ci_if_error: false
 
+  # 3. 性能基准测试
   benchmark:
-    name: Performance Benchmarks
+    name: 性能基准测试
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
+      - name: 缓存 Cargo 依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -123,10 +127,10 @@ jobs:
             tcp-forwarder/target
           key: ${{ runner.os }}-bench-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run benchmarks
+      - name: 运行基准测试
         run: cd tcp-forwarder && cargo bench
 
-      - name: Store benchmark results
+      - name: 存储基准测试结果
         uses: benchmark-action/github-action-benchmark@v1
         if: github.ref == 'refs/heads/main'
         with:

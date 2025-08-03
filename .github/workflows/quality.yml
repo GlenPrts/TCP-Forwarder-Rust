@@ -1,3 +1,9 @@
+# Code Quality & Security
+#
+# 本工作流自动化代码质量、文档、安全、合规、性能、供应链安全等检查，保障主分支和开发分支的稳定性。
+#
+# 支持手动触发、定时触发、push/pull_request 事件。
+
 name: Code Quality & Security
 
 on:
@@ -5,28 +11,28 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
   # schedule:
-  #   # 每天 UTC 02:00 运行全面扫描
-  #   - cron: '0 2 * * *'
+  #   - cron: '0 2 * * *' # 每天 UTC 02:00 运行全面扫描
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 1. 代码质量分析
   code-quality:
-    name: Code Quality Analysis
+    name: 代码质量分析
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
+      - name: 缓存 Cargo 依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -35,55 +41,97 @@ jobs:
             tcp-forwarder/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Format check
-        run: |
-          cd tcp-forwarder
-          cargo fmt --all -- --check
+      - name: 格式检查
+        run: cd tcp-forwarder && cargo fmt --all -- --check
 
-      - name: Clippy analysis
-        run: |
-          cd tcp-forwarder
-          cargo clippy --all-targets --all-features -- -D warnings
+      - name: Clippy 静态分析
+        run: cd tcp-forwarder && cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Documentation check
-        run: |
-          cd tcp-forwarder
-          cargo doc --no-deps --document-private-items
+      - name: 文档检查
+        run: cd tcp-forwarder && cargo doc --no-deps --document-private-items
 
+  # 2. 安全审计
   security-audit:
-    name: Security Audit
+    name: 安全审计
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-audit
+      - name: 安装 cargo-audit
         run: cargo install cargo-audit
 
-      - name: Run security audit
-        run: |
-          cd tcp-forwarder
-          cargo audit
+      - name: 运行安全审计
+        run: cd tcp-forwarder && cargo audit
 
-      - name: Install cargo-deny
+      - name: 安装 cargo-deny
         run: cargo install cargo-deny
 
-      - name: Run cargo-deny
-        run: |
-          cd tcp-forwarder
-          cargo deny check
+      - name: 运行 cargo-deny
+        run: cd tcp-forwarder && cargo deny check
 
-  vulnerability-scan:
-    name: Vulnerability Scanning
+  # 3. 许可证合规检查
+  license-check:
+    name: 许可证合规检查
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Run Trivy vulnerability scanner
+      - name: 设置 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装 cargo-license
+        run: cargo install cargo-license
+
+      - name: 检查依赖许可证
+        run: cd tcp-forwarder && cargo license --json > licenses.json
+      
+      - name: 上传许可证报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-report
+          path: tcp-forwarder/licenses.json
+
+  # 4. CodeQL 静态安全分析
+  codeql-analysis:
+    name: CodeQL 静态安全分析
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 初始化 CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: 'rust'
+          queries: security-and-quality
+
+      - name: 设置 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 构建项目
+        run: cd tcp-forwarder && cargo build --release
+
+      - name: 执行 CodeQL 分析
+        uses: github/codeql-action/analyze@v3
+
+  # 5. 漏洞扫描（Trivy）
+  vulnerability-scan:
+    name: 漏洞扫描
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 运行 Trivy 漏洞扫描
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
@@ -91,141 +139,76 @@ jobs:
           format: 'sarif'
           output: 'trivy-results.sarif'
 
-      - name: Upload Trivy scan results to GitHub Security tab
+      - name: 上传 Trivy 扫描结果到 GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
 
-  codeql-analysis:
-    name: CodeQL Analysis
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: 'rust' # 明确指定为 Rust，CodeQL 支持 Rust
-          queries: security-and-quality
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build project
-        run: |
-          cd tcp-forwarder
-          cargo build --release
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-
-  license-check:
-    name: License Compliance
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-license
-        run: cargo install cargo-license
-
-      - name: Check licenses
-        run: |
-          cd tcp-forwarder
-          cargo license --json > licenses.json
-          
-      - name: Upload license report
-        uses: actions/upload-artifact@v4
-        with:
-          name: license-report
-          path: tcp-forwarder/licenses.json
-
+  # 6. 性能分析（可选）
   performance-analysis:
-    name: Performance Analysis
+    name: 性能分析
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install criterion
-        run: |
-          cd tcp-forwarder
-          # 如果有性能测试，添加criterion依赖
-          # cargo add --dev criterion
+      - name: 安装 criterion
+        run: cd tcp-forwarder && echo "如需性能测试请添加 criterion 依赖"
 
-      - name: Run benchmarks
-        run: |
-          cd tcp-forwarder
-          # cargo bench
-          echo "性能测试配置待完善"
+      - name: 运行基准测试
+        run: cd tcp-forwarder && echo "性能测试配置待完善"
 
-  # --- 修正后的部分 ---
+  # 7. 供应链安全（SLSA provenance）
   supply-chain-security:
-    name: Supply Chain Security
-    # 权限对于生成SLSA provenance至关重要
+    name: 供应链安全
     permissions:
       id-token: write
       contents: write
       actions: read
-    # 'uses' 关键字在作业的顶层，表示调用一个可重用的工作流程
-    # 这个工作流程会处理自己的运行环境（runs-on）和步骤（steps）
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.10.0
     with:
-      # 注意: 'base64-subjects' 应该包含你构建产物的 Base64 编码的 SHA256 哈希值
-      # 为了让 SLSA provenance 有意义，你通常需要一个单独的构建作业来生成产物
-      # 并将其哈希值作为输出，然后在这里使用。
       base64-subjects: "" # 示例值，请根据实际构建产物修改
       provenance-name: "tcp-forwarder-provenance.intoto.jsonl"
-  
+
+  # 8. 质量门禁（统一汇总所有质量与安全检查结果）
   quality-gate:
-    name: Quality Gate
+    name: 质量门禁
     runs-on: ubuntu-latest
-    # 添加 'supply-chain-security' 到 needs 依赖中
-    needs: [code-quality, security-audit, vulnerability-scan, supply-chain-security]
+    needs: [code-quality, security-audit, license-check, codeql-analysis, vulnerability-scan, supply-chain-security]
     if: always()
     steps:
-      - name: Check quality gate
+      - name: 检查质量门禁
         run: |
           echo "=== 质量门禁检查 ==="
-          
-          # 检查各个job的状态
           code_quality="${{ needs.code-quality.result }}"
           security_audit="${{ needs.security-audit.result }}"
+          license_check="${{ needs.license-check.result }}"
+          codeql_analysis="${{ needs.codeql-analysis.result }}"
           vulnerability_scan="${{ needs.vulnerability-scan.result }}"
           supply_chain_security="${{ needs.supply-chain-security.result }}"
-          
           echo "代码质量检查: $code_quality"
           echo "安全审计: $security_audit"
+          echo "许可证合规: $license_check"
+          echo "CodeQL 分析: $codeql_analysis"
           echo "漏洞扫描: $vulnerability_scan"
           echo "供应链安全: $supply_chain_security"
-          
-          # 如果任何关键检查失败，则失败
-          if [[ "$code_quality" != "success" || "$security_audit" != "success" || "$supply_chain_security" != "success" ]]; then
+          # 关键检查失败则直接失败
+          if [[ "$code_quality" != "success" || "$security_audit" != "success" || "$license_check" != "success" || "$codeql_analysis" != "success" || "$supply_chain_security" != "success" ]]; then
             echo "❌ 质量门禁检查失败"
             exit 1
           fi
-          
           if [[ "$vulnerability_scan" != "success" ]]; then
             echo "⚠️  漏洞扫描检查失败，请查看安全报告"
-            # 可以选择是否因为漏洞扫描失败而阻止部署
+            # 可选：是否因漏洞扫描失败阻止部署
             # exit 1
           fi
-          
           echo "✅ 质量门禁检查通过"
 
-      - name: Comment PR on failure
+      - name: PR 失败时评论
         if: failure() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
@@ -234,14 +217,10 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## ❌ 质量门禁检查失败
-              
-              代码质量或安全检查未通过，请检查失败的作业日志。
-              
-              请修复相关问题后重新提交。`
+              body: `## ❌ 质量门禁检查失败\n\n代码质量或安全检查未通过，请检查失败的作业日志。\n\n请修复相关问题后重新提交。`
             })
 
-      - name: Comment PR on success
+      - name: PR 通过时评论
         if: success() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
@@ -250,7 +229,5 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## ✅ 质量门禁检查通过
-              
-              所有代码质量和安全检查均已通过！该PR可以安全合并。`
+              body: `## ✅ 质量门禁检查通过\n\n所有代码质量和安全检查均已通过！该PR可以安全合并。`
             })

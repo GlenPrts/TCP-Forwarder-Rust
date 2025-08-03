@@ -1,3 +1,9 @@
+# Build and Release
+#
+# 本工作流自动化代码质量检查、多平台构建、Docker镜像、发布、以及安全扫描。
+#
+# 支持主分支、开发分支、tag发布、PR触发。
+
 name: Build and Release
 
 on:
@@ -13,20 +19,20 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # 代码质量检查
+  # 1. 代码质量检查
   quality-check:
-    name: Code Quality Check
+    name: 代码质量检查
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
+      - name: 缓存 Cargo 依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -35,25 +41,27 @@ jobs:
             tcp-forwarder/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Check formatting
+      - name: 格式检查
         run: cargo fmt --all -- --check
-        working-directory: ./tcp-forwarder 
+        working-directory: ./tcp-forwarder
 
-      - name: Run clippy
+      - name: Clippy 静态分析
         run: cargo clippy --all-targets --all-features -- -D warnings
         working-directory: ./tcp-forwarder
         
-      - name: Run tests
+      - name: 运行测试
         run: cargo test --verbose
         working-directory: ./tcp-forwarder
-  # 多平台构建二进制文件
+
+  # 2. 多平台构建二进制文件
   build-binaries:
-    name: Build Binary (${{ matrix.target }})
+    name: 多平台构建二进制文件 (${{ matrix.target }})
     needs: quality-check
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Linux/Windows/macOS/Android/iOS 多平台
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: tcp-forwarder-linux-amd64
@@ -75,7 +83,7 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: tcp-forwarder-macos-arm64
-          # Android 平台
+          # Android
           - target: aarch64-linux-android
             os: ubuntu-latest
             name: tcp-forwarder-android-arm64
@@ -88,7 +96,7 @@ jobs:
           - target: x86_64-linux-android
             os: ubuntu-latest
             name: tcp-forwarder-android-x86_64
-          # iOS 平台
+          # iOS
           - target: aarch64-apple-ios
             os: macos-latest
             name: tcp-forwarder-ios-arm64
@@ -98,15 +106,15 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux)
+      - name: 安装交叉编译工具 (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
@@ -120,7 +128,6 @@ jobs:
           elif [[ "${{ matrix.target }}" == "x86_64-pc-windows-gnu" ]]; then
             sudo apt-get install -y gcc-mingw-w64-x86-64
           elif [[ "${{ matrix.target }}" =~ android ]]; then
-            # 安装 Android NDK
             wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
             unzip -q android-ndk-r25c-linux.zip
             export ANDROID_NDK_HOME=$PWD/android-ndk-r25c
@@ -128,13 +135,12 @@ jobs:
             echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
           fi
 
-      - name: Install iOS tools (macOS)
+      - name: 安装 iOS 工具 (macOS)
         if: matrix.os == 'macos-latest' && contains(matrix.target, 'ios')
         run: |
-          # iOS 工具已经预装在 macOS runner 中
           xcode-select --install 2>/dev/null || true
 
-      - name: Cache cargo registry
+      - name: 缓存 Cargo 依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -143,7 +149,7 @@ jobs:
             tcp-forwarder/target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Configure cross-compilation
+      - name: 配置交叉编译环境变量
         run: |
           case "${{ matrix.target }}" in
             aarch64-unknown-linux-gnu)
@@ -177,12 +183,10 @@ jobs:
               ;;
           esac
 
-      - name: Build binary
-        run: |
-          cd tcp-forwarder
-          cargo build --release --target ${{ matrix.target }}
+      - name: 构建二进制文件
+        run: cd tcp-forwarder && cargo build --release --target ${{ matrix.target }}
 
-      - name: Prepare binary
+      - name: 整理产物
         run: |
           mkdir -p dist
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then
@@ -192,29 +196,29 @@ jobs:
           fi
           chmod +x dist/${{ matrix.name }}
 
-      - name: Upload binary artifact
+      - name: 上传二进制产物
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: dist/${{ matrix.name }}
           retention-days: 7
 
-  # 构建Docker镜像（多平台）
+  # 3. 构建并推送 Docker 镜像（多平台）
   build-docker:
-    name: Build Docker Images
+    name: 构建并推送 Docker 镜像
     needs: quality-check
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
+      - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Container Registry
+      - name: 登录容器仓库
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
@@ -222,7 +226,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: 提取镜像元数据
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -235,7 +239,7 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push Docker image
+      - name: 构建并推送 Docker 镜像
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -246,24 +250,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # 发布版本
+  # 4. 发布 Release
   release:
-    name: Create Release
+    name: 发布 Release
     needs: [build-binaries, build-docker]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: 下载所有产物
         uses: actions/download-artifact@v4
         with:
           path: dist
 
-      - name: Prepare release assets
+      - name: 整理发布资源
         run: |
           cd dist
           for dir in */; do
@@ -276,7 +280,7 @@ jobs:
           done
           ls -la *.tar.gz
 
-      - name: Generate changelog
+      - name: 生成更新日志
         id: changelog
         run: |
           if [ -f CHANGELOG.md ]; then
@@ -288,7 +292,7 @@ jobs:
           echo "$changelog" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Create Release
+      - name: 创建 Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
@@ -335,23 +339,23 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
 
-  # 安全扫描
+  # 5. Docker 镜像安全扫描
   security-scan:
-    name: Security Scan
+    name: Docker 镜像安全扫描
     needs: build-docker
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     permissions:
       security-events: write
     steps:
-      - name: Run Trivy vulnerability scanner
+      - name: 运行 Trivy 镜像漏洞扫描
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           format: 'sarif'
           output: 'trivy-results.sarif'
 
-      - name: Upload Trivy scan results
+      - name: 上传 Trivy 扫描结果
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:

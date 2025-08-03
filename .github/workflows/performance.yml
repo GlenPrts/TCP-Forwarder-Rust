@@ -1,3 +1,8 @@
+# Performance Monitoring
+#
+# 本工作流自动化性能监控、基准测试、负载测试、内存分析、安全基准测试，并生成性能报告。
+# 支持主分支、PR、手动触发和定时触发（可解注释 schedule）。
+
 name: Performance Monitoring
 
 on:
@@ -6,25 +11,25 @@ on:
   pull_request:
     branches: [ main ]
   # schedule:
-  #   # 每天 UTC 06:00 运行性能监控
-  #   - cron: '0 6 * * *'
-  workflow_dispatch: # 允许手动触发
+  #   - cron: '0 6 * * *' # 每天 UTC 06:00 运行性能监控
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 1. 性能基准测试
   benchmark:
-    name: Performance Benchmarks
+    name: 性能基准测试
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
+      - name: 缓存 Cargo 依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -33,69 +38,55 @@ jobs:
             tcp-forwarder/target
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
+      - name: 安装系统依赖
+        run: sudo apt-get update && sudo apt-get install -y build-essential
 
-      - name: Run unit test benchmarks
+      - name: 运行单元测试基准
         run: |
           cd tcp-forwarder
-          # 运行基准测试（如果存在）
+          # 运行基准测试（如有）
           cargo test --release --tests -- --nocapture
 
-      - name: Memory usage analysis
+      - name: 内存使用分析
         run: |
           cd tcp-forwarder
-          # 编译用于内存分析的版本
           cargo build --release
-          
-          # 使用valgrind进行内存分析（如果可用）
           if command -v valgrind &> /dev/null; then
             echo "Running memory analysis..."
             # valgrind --tool=massif --detailed-freq=1 --max-snapshots=100 ./target/release/tcp-forwarder --help
           fi
 
-      - name: Binary size analysis
+      - name: 二进制大小分析
         run: |
           cd tcp-forwarder
           cargo build --release
-          
           echo "=== 二进制文件大小分析 ==="
           ls -lh target/release/tcp-forwarder
-          
-          # 使用strip减小二进制大小
           strip target/release/tcp-forwarder
           echo "After strip:"
           ls -lh target/release/tcp-forwarder
-          
-          # 分析二进制文件组成
           if command -v bloaty &> /dev/null; then
             bloaty target/release/tcp-forwarder
           fi
 
+  # 2. 负载测试
   load-test:
-    name: Load Testing
+    name: 负载测试
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build application
-        run: |
-          cd tcp-forwarder
-          cargo build --release
+      - name: 构建应用
+        run: cd tcp-forwarder && cargo build --release
 
-      - name: Setup test environment
-        run: |
-          # 安装负载测试工具
-          sudo apt-get update
-          sudo apt-get install -y wrk apache2-utils
+      - name: 安装负载测试工具
+        run: sudo apt-get update && sudo apt-get install -y wrk apache2-utils
 
-      - name: Start TCP forwarder
+      - name: 启动 TCP forwarder
         run: |
           cd tcp-forwarder
           # 创建测试配置
@@ -128,52 +119,34 @@ jobs:
               min_score: 1.0
               window_size: 10
           EOF
-          
-          # 启动应用程序（后台运行）
           ./target/release/tcp-forwarder --config test_config.yaml &
           APP_PID=$!
           echo "APP_PID=$APP_PID" >> $GITHUB_ENV
-          
-          # 等待应用启动
           sleep 5
 
-      - name: Setup mock backend
+      - name: 启动模拟后端
         run: |
-          # 创建简单的HTTP服务器作为后端
           python3 -m http.server 8080 &
           BACKEND_PID=$!
           echo "BACKEND_PID=$BACKEND_PID" >> $GITHUB_ENV
-          
-          # 等待后端启动
           sleep 2
 
-      - name: Run load tests
+      - name: 运行负载测试
         run: |
           echo "=== 负载测试开始 ==="
-          
-          # 基础连接测试
           if nc -z 127.0.0.1 3000; then
             echo "✅ TCP forwarder正在运行"
           else
             echo "❌ TCP forwarder未启动"
             exit 1
           fi
-          
-          # HTTP负载测试
-          echo "运行HTTP负载测试..."
           ab -n 1000 -c 10 http://127.0.0.1:3000/ || echo "负载测试完成"
-          
-          # 使用wrk进行更详细的测试
           if command -v wrk &> /dev/null; then
-            echo "运行wrk负载测试..."
             wrk -t4 -c10 -d30s http://127.0.0.1:3000/ || echo "wrk测试完成"
           fi
 
-      - name: Collect metrics
+      - name: 收集性能指标
         run: |
-          echo "=== 收集性能指标 ==="
-          
-          # 检查Prometheus指标
           if curl -s http://127.0.0.1:9090/metrics > metrics.txt; then
             echo "✅ 成功收集Prometheus指标"
             grep -E "(tcp_forwarder|connections|requests)" metrics.txt || echo "指标收集完成"
@@ -181,74 +154,50 @@ jobs:
             echo "❌ 无法收集Prometheus指标"
           fi
 
-      - name: Cleanup
+      - name: 清理进程
         if: always()
         run: |
-          # 清理进程
-          if [ ! -z "$APP_PID" ]; then
-            kill $APP_PID || true
-          fi
-          if [ ! -z "$BACKEND_PID" ]; then
-            kill $BACKEND_PID || true
-          fi
+          if [ ! -z "$APP_PID" ]; then kill $APP_PID || true; fi
+          if [ ! -z "$BACKEND_PID" ]; then kill $BACKEND_PID || true; fi
 
+  # 3. 内存分析
   memory-profiling:
-    name: Memory Profiling
+    name: 内存分析
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: 设置 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install profiling tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y valgrind heaptrack
+      - name: 安装分析工具
+        run: sudo apt-get update && sudo apt-get install -y valgrind heaptrack
 
-      - name: Build with debug symbols
-        run: |
-          cd tcp-forwarder
-          cargo build --release
+      - name: 构建带调试符号的版本
+        run: cd tcp-forwarder && cargo build --release
 
-      - name: Memory leak detection
+      - name: 内存泄漏检测
         run: |
           cd tcp-forwarder
           echo "=== 内存泄漏检测 ==="
-          
-          # 使用valgrind检测内存泄漏
-          timeout 30s valgrind \
-            --tool=memcheck \
-            --leak-check=full \
-            --show-leak-kinds=all \
-            --track-origins=yes \
-            --verbose \
-            ./target/release/tcp-forwarder --help || echo "内存检测完成"
+          timeout 30s valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all --track-origins=yes --verbose ./target/release/tcp-forwarder --help || echo "内存检测完成"
 
+  # 4. 安全基准测试
   security-benchmark:
-    name: Security Benchmarks
+    name: 安全基准测试
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Build application
-        run: |
-          cd tcp-forwarder
-          cargo build --release
+      - name: 构建应用
+        run: cd tcp-forwarder && cargo build --release
 
-      - name: Network security testing
+      - name: 网络安全测试
         run: |
-          echo "=== 网络安全测试 ==="
-          
-          # 安装网络安全测试工具
-          sudo apt-get update
-          sudo apt-get install -y nmap netcat-openbsd
-          
+          sudo apt-get update && sudo apt-get install -y nmap netcat-openbsd
           cd tcp-forwarder
-          
-          # 启动应用进行安全测试
           cat > security_test_config.yaml << 'EOF'
           proxy:
             dial_timeout: 5s
@@ -263,41 +212,28 @@ jobs:
           server:
             bind: "127.0.0.1:3001"
           EOF
-          
-          # 启动应用
           ./target/release/tcp-forwarder --config security_test_config.yaml &
           APP_PID=$!
-          
-          # 等待启动
           sleep 3
-          
-          # 端口扫描测试
           if command -v nmap &> /dev/null; then
-            echo "运行端口扫描..."
             nmap -p 3001 127.0.0.1 || echo "端口扫描完成"
           fi
-          
-          # 连接测试
-          echo "运行连接测试..."
           nc -z 127.0.0.1 3001 && echo "✅ 端口可访问" || echo "❌ 端口不可访问"
-          
-          # 清理
           kill $APP_PID || true
 
+  # 5. 性能报告生成
   performance-report:
-    name: Performance Report
+    name: 性能报告生成
     runs-on: ubuntu-latest
     needs: [benchmark, load-test, memory-profiling]
     if: always()
     steps:
-      - name: Generate performance report
+      - name: 生成性能报告
         run: |
           echo "=== 性能测试报告 ==="
           echo "基准测试状态: ${{ needs.benchmark.result }}"
           echo "负载测试状态: ${{ needs.load-test.result }}"
           echo "内存分析状态: ${{ needs.memory-profiling.result }}"
-          
-          # 创建性能报告
           cat > performance_report.md << 'EOF'
           # 🚀 性能测试报告
           
@@ -324,10 +260,9 @@ jobs:
           ---
           报告生成时间: $(date)
           EOF
-          
           echo "性能报告已生成"
 
-      - name: Upload performance report
+      - name: 上传性能报告
         uses: actions/upload-artifact@v4
         with:
           name: performance-report
