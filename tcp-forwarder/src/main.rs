@@ -15,14 +15,12 @@ use std::time::Duration;
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use rand::prelude::*;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::copy_bidirectional;
 use tokio::signal;
 use tracing::{info, warn, error, debug, Level, instrument};
 use tracing_subscriber::EnvFilter;
 use selector::ActiveRemotes;
-
 use crate::metrics::METRICS;
 use crate::loadbalancer::{LoadBalancer, LoadBalanceAlgorithm};
 
@@ -346,19 +344,40 @@ fn load_ip_list(score_board: &scorer::ScoreBoard, config: &config::RemotesConfig
             continue;
         }
         
-        // 尝试解析IP地址
-        let ip: IpAddr = match line.parse() {
-            Ok(ip) => ip,
+        // CIDR格式的IP地址解析
+        if line.contains('/') {
+            // 处理CIDR格式（例如：192.168.1.0/24 或 2001:db8::/32）
+            let cidr: ipnetwork::IpNetwork = line.parse().context(format!("无法解析CIDR格式IP: {}", line))?;
+            let ip = cidr.ip();
+            // CIDR格式不包含端口信息，使用默认端口
+            let port = config.default_remote_port;
+            
+            // 创建初始评分数据
+            let score_data = scorer::ScoreData::new(
+                ip,
+                port,
+                &config.scoring,
+            );
+            
+            // 添加到评分板
+            score_board.insert(ip, score_data);
+            count += 1;
+            continue;
+        }
+
+        // 解析IP地址和端口（支持IPv4和IPv6格式）
+        let (ip, port) = match parse_ip_port(line, config.default_remote_port) {
+            Ok((ip, port)) => (ip, port),
             Err(e) => {
                 warn!("无法解析IP地址: {}, 错误: {}", line, e);
                 continue;
             }
         };
-        
+
         // 创建初始评分数据
         let score_data = scorer::ScoreData::new(
             ip,
-            config.default_remote_port,
+            port,
             &config.scoring,
         );
         
@@ -537,4 +556,118 @@ fn init_logging(logging_config: &config::LoggingConfig) -> Result<()> {
     }
     
     Ok(())
+}
+
+/// 解析IP地址和端口号
+/// 支持以下格式：
+/// - IPv4: 192.168.1.1, 192.168.1.1:8080
+/// - IPv6: 2001:db8::1, [2001:db8::1]:8080
+/// - 主机名: example.com, example.com:8080
+fn parse_ip_port(address: &str, default_port: u16) -> Result<(IpAddr, u16)> {
+    let address = address.trim();
+    
+    // 处理IPv6地址格式 [ip]:port
+    if address.starts_with('[') {
+        if let Some(bracket_end) = address.find("]:") {
+            // 格式：[2001:db8::1]:8080
+            let ip_str = &address[1..bracket_end];
+            let port_str = &address[bracket_end + 2..];
+            
+            let ip: IpAddr = ip_str.parse()
+                .context(format!("无法解析IPv6地址: {}", ip_str))?;
+            let port: u16 = port_str.parse()
+                .context(format!("无法解析端口号: {}", port_str))?;
+            
+            return Ok((ip, port));
+        } else if address.ends_with(']') {
+            // 格式：[2001:db8::1]（没有端口）
+            let ip_str = &address[1..address.len()-1];
+            let ip: IpAddr = ip_str.parse()
+                .context(format!("无法解析IPv6地址: {}", ip_str))?;
+            
+            return Ok((ip, default_port));
+        }
+    }
+    
+    // 检查是否包含端口分隔符
+    if let Some(last_colon) = address.rfind(':') {
+        let ip_part = &address[..last_colon];
+        let port_part = &address[last_colon + 1..];
+        
+        // 尝试解析端口部分
+        if let Ok(port) = port_part.parse::<u16>() {
+            // 如果端口解析成功，尝试解析IP部分
+            if let Ok(ip) = ip_part.parse::<IpAddr>() {
+                return Ok((ip, port));
+            }
+        }
+        
+        // 如果上面的解析失败，可能是IPv6地址没有端口
+        // 例如：2001:db8::1（IPv6地址本身包含冒号）
+        if let Ok(ip) = address.parse::<IpAddr>() {
+            return Ok((ip, default_port));
+        }
+    } else {
+        // 没有冒号，直接尝试解析为IP地址
+        if let Ok(ip) = address.parse::<IpAddr>() {
+            return Ok((ip, default_port));
+        }
+    }
+    
+    Err(anyhow::anyhow!("无法解析地址格式: {}", address))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn test_parse_ip_port_ipv4() {
+        // IPv4不带端口
+        let (ip, port) = parse_ip_port("192.168.1.1", 3000).unwrap();
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(port, 3000);
+
+        // IPv4带端口
+        let (ip, port) = parse_ip_port("192.168.1.1:8080", 3000).unwrap();
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_parse_ip_port_ipv6() {
+        // IPv6不带端口
+        let (ip, port) = parse_ip_port("2001:db8::1", 3000).unwrap();
+        assert_eq!(ip, IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)));
+        assert_eq!(port, 3000);
+
+        // IPv6带方括号不带端口
+        let (ip, port) = parse_ip_port("[2001:db8::1]", 3000).unwrap();
+        assert_eq!(ip, IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)));
+        assert_eq!(port, 3000);
+
+        // IPv6带方括号和端口
+        let (ip, port) = parse_ip_port("[2001:db8::1]:8080", 3000).unwrap();
+        assert_eq!(ip, IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)));
+        assert_eq!(port, 8080);
+
+        // IPv6回环地址
+        let (ip, port) = parse_ip_port("[::1]:9000", 3000).unwrap();
+        assert_eq!(ip, IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert_eq!(port, 9000);
+    }
+
+    #[test]
+    fn test_parse_ip_port_edge_cases() {
+        // 带空格
+        let (ip, port) = parse_ip_port("  192.168.1.1:8080  ", 3000).unwrap();
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(port, 8080);
+
+        // 无效格式应该返回错误
+        assert!(parse_ip_port("invalid", 3000).is_err());
+        assert!(parse_ip_port("256.256.256.256", 3000).is_err());
+        assert!(parse_ip_port("[invalid_ipv6]", 3000).is_err());
+    }
 }

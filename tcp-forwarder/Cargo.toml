@@ -33,3 +33,5 @@ socket2 = "0.6"
 # 异步utilities
 futures = "0.3"
 tower-http = { version = "0.6", features = ["cors"] }
+# IP网络处理
+ipnetwork = "0.21.1"

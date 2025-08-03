@@ -85,66 +85,161 @@ impl ScoreData {
         }
     }
 
-    /// 计算总分
+    /// 计算总分（归一化到0-100）
     pub fn calculate_score(&self, config: &crate::config::ScoringConfig) -> f64 {
-        // 计算延迟得分
+        // 计算延迟得分（0-1范围内的归一化分数）
         let latency_ms = self.latency_ewma.value();
         let base_latency_ms = config.latency.base_latency.as_millis() as f64;
         let max_latency_ms = config.latency.max_acceptable_latency.as_millis() as f64;
         
-        let latency_score = if latency_ms <= base_latency_ms {
+        let latency_normalized = if latency_ms <= base_latency_ms {
             // 延迟低于基准，满分
-            config.latency.max_score
+            1.0
         } else if latency_ms >= max_latency_ms {
             // 延迟高于最大可接受值，0分
             0.0
         } else {
             // 线性插值计算分数
-            let ratio = (max_latency_ms - latency_ms) / (max_latency_ms - base_latency_ms);
-            ratio * config.latency.max_score
+            (max_latency_ms - latency_ms) / (max_latency_ms - base_latency_ms)
         };
 
-        // 计算抖动得分
+        // 计算抖动得分（0-1范围内的归一化分数）
         let jitter_ms = self.jitter_ewma.value();
         let base_jitter_ms = config.jitter.base_jitter.as_millis() as f64;
         let max_jitter_ms = config.jitter.max_acceptable_jitter.as_millis() as f64;
         
-        let jitter_score = if jitter_ms <= base_jitter_ms {
+        let jitter_normalized = if jitter_ms <= base_jitter_ms {
             // 抖动低于基准，满分
-            config.jitter.max_score
+            1.0
         } else if jitter_ms >= max_jitter_ms {
             // 抖动高于最大可接受值，0分
             0.0
         } else {
             // 线性插值计算分数
-            let ratio = (max_jitter_ms - jitter_ms) / (max_jitter_ms - base_jitter_ms);
-            ratio * config.jitter.max_score
+            (max_jitter_ms - jitter_ms) / (max_jitter_ms - base_jitter_ms)
         };
 
-        // 计算成功率得分
-        let success_rate = self.success_rate_ewma.value();
-        let success_score = success_rate * config.success_rate.max_score;
+        // 计算成功率得分（0-1范围内的归一化分数）
+        let success_rate_normalized = self.success_rate_ewma.value().clamp(0.0, 1.0);
 
-        // 总分 = 各项得分之和 - 失败惩罚 + 历史稳定性奖励
-        let total_score = latency_score + jitter_score + success_score - self.failure_penalty + self.historical_bonus;
+        // 使用权重配置计算加权分数
+        let weighted_score = latency_normalized * config.weights.latency +
+                           jitter_normalized * config.weights.jitter +
+                           success_rate_normalized * config.weights.success_rate;
+
+        // 将加权分数转换为0-100范围（权重之和应该为1.0）
+        let base_score = weighted_score * 100.0;
         
-        // 分数不应该小于0
-        total_score.max(0.0)
+        // 应用失败惩罚（从基础分中扣除）
+        let score_after_penalty = (base_score - self.failure_penalty).max(0.0);
+        
+        // 应用历史稳定性奖励（但不超过100分上限）
+        let final_score = (score_after_penalty + self.historical_bonus).min(100.0);
+        
+        // 确保分数在0-100范围内
+        final_score.clamp(0.0, 100.0)
     }
 
-        /// 获取总分（使用当前上下文的配置）
+    /// 获取总分（简化版本，归一化到0-100）
+    /// 注意：这是一个简化版本，使用默认配置参数，仅用于快速评估
     pub fn total_score(&self) -> f64 {
-        // 使用缓存的值作为简单近似分数
-        // 实际应用中可能需要更复杂的计算或缓存机制
-        let latency_score = self.latency_ewma.value();
-        let jitter_score = self.jitter_ewma.value();
-        let success_score = self.success_rate_ewma.value() * 100.0; // 放大为0-100分
+        // 使用默认权重：延迟45%，抖动15%，成功率40%
+        const DEFAULT_LATENCY_WEIGHT: f64 = 0.45;
+        const DEFAULT_JITTER_WEIGHT: f64 = 0.15;
+        const DEFAULT_SUCCESS_RATE_WEIGHT: f64 = 0.40;
         
-        // 基础分是成功率、延迟和抖动的综合评分
-        let base_score = success_score - latency_score / 10.0 - jitter_score / 5.0;
+        // 延迟分数：延迟越低分数越高
+        // 假设理想延迟是50ms，最大可接受延迟是500ms
+        let latency_ms = self.latency_ewma.value();
+        let latency_normalized = if latency_ms <= 50.0 {
+            1.0 // 满分
+        } else if latency_ms >= 500.0 {
+            0.0 // 0分
+        } else {
+            (500.0 - latency_ms) / (500.0 - 50.0)
+        };
+        
+        // 抖动分数：抖动越低分数越高
+        // 假设理想抖动是10ms，最大可接受抖动是80ms
+        let jitter_ms = self.jitter_ewma.value();
+        let jitter_normalized = if jitter_ms <= 10.0 {
+            1.0 // 满分
+        } else if jitter_ms >= 80.0 {
+            0.0 // 0分
+        } else {
+            (80.0 - jitter_ms) / (80.0 - 10.0)
+        };
+        
+        // 成功率分数（已经在0-1范围内）
+        let success_rate_normalized = self.success_rate_ewma.value().clamp(0.0, 1.0);
+        
+        // 使用权重计算加权分数
+        let weighted_score = latency_normalized * DEFAULT_LATENCY_WEIGHT +
+                           jitter_normalized * DEFAULT_JITTER_WEIGHT +
+                           success_rate_normalized * DEFAULT_SUCCESS_RATE_WEIGHT;
+        
+        // 转换为0-100范围
+        let base_score = weighted_score * 100.0;
         
         // 应用惩罚和奖励
-        (base_score - self.failure_penalty + self.historical_bonus).max(0.0)
+        let score_after_penalty = (base_score - self.failure_penalty).max(0.0);
+        let final_score = (score_after_penalty + self.historical_bonus).min(100.0);
+        
+        // 确保分数在0-100范围内
+        final_score.clamp(0.0, 100.0)
+    }
+
+    /// 获取详细的评分信息（用于调试和监控）
+    pub fn get_score_details(&self, config: &crate::config::ScoringConfig) -> ScoreDetails {
+        let latency_ms = self.latency_ewma.value();
+        let base_latency_ms = config.latency.base_latency.as_millis() as f64;
+        let max_latency_ms = config.latency.max_acceptable_latency.as_millis() as f64;
+        
+        let latency_normalized = if latency_ms <= base_latency_ms {
+            1.0
+        } else if latency_ms >= max_latency_ms {
+            0.0
+        } else {
+            (max_latency_ms - latency_ms) / (max_latency_ms - base_latency_ms)
+        };
+        let latency_score = latency_normalized * config.weights.latency * 100.0;
+
+        let jitter_ms = self.jitter_ewma.value();
+        let base_jitter_ms = config.jitter.base_jitter.as_millis() as f64;
+        let max_jitter_ms = config.jitter.max_acceptable_jitter.as_millis() as f64;
+        
+        let jitter_normalized = if jitter_ms <= base_jitter_ms {
+            1.0
+        } else if jitter_ms >= max_jitter_ms {
+            0.0
+        } else {
+            (max_jitter_ms - jitter_ms) / (max_jitter_ms - base_jitter_ms)
+        };
+        let jitter_score = jitter_normalized * config.weights.jitter * 100.0;
+
+        let success_rate = self.success_rate_ewma.value().clamp(0.0, 1.0);
+        let success_score = success_rate * config.weights.success_rate * 100.0;
+
+        let base_score = latency_score + jitter_score + success_score;
+        let score_after_penalty = (base_score - self.failure_penalty).max(0.0);
+        let final_score = (score_after_penalty + self.historical_bonus).min(100.0).clamp(0.0, 100.0);
+
+        ScoreDetails {
+            ip: self.ip,
+            port: self.port,
+            latency_ms,
+            latency_score,
+            jitter_ms,
+            jitter_score,
+            success_rate,
+            success_score,
+            base_score,
+            failure_penalty: self.failure_penalty,
+            historical_bonus: self.historical_bonus,
+            final_score,
+            consecutive_failures: self.consecutive_failures,
+            consecutive_successes: self.consecutive_successes,
+        }
     }
 
     /// 记录连接成功
@@ -239,6 +334,46 @@ impl ScoreData {
                 self.historical_bonus = 0.0;
             }
         }
+    }
+}
+
+/// 评分详情结构体，用于调试和监控
+#[derive(Debug, Clone)]
+pub struct ScoreDetails {
+    pub ip: IpAddr,
+    pub port: u16,
+    pub latency_ms: f64,
+    pub latency_score: f64,
+    pub jitter_ms: f64,
+    pub jitter_score: f64,
+    pub success_rate: f64,
+    pub success_score: f64,
+    pub base_score: f64,
+    pub failure_penalty: f64,
+    pub historical_bonus: f64,
+    pub final_score: f64,
+    pub consecutive_failures: u32,
+    pub consecutive_successes: u64,
+}
+
+impl ScoreDetails {
+    /// 格式化为易读的字符串
+    pub fn format(&self) -> String {
+        format!(
+            "IP: {} | 总分: {:.1} | 延迟: {:.1}ms({:.1}分) | 抖动: {:.1}ms({:.1}分) | 成功率: {:.1}%({:.1}分) | 惩罚: {:.1} | 奖励: {:.1} | 连败: {} | 连胜: {}",
+            self.ip,
+            self.final_score,
+            self.latency_ms,
+            self.latency_score,
+            self.jitter_ms,
+            self.jitter_score,
+            self.success_rate * 100.0,
+            self.success_score,
+            self.failure_penalty,
+            self.historical_bonus,
+            self.consecutive_failures,
+            self.consecutive_successes
+        )
     }
 }
 
