@@ -18,7 +18,7 @@ logging:
   # 日志级别，决定了哪些日志会被记录。
   # 可选值: "trace", "debug", "info", "warn", "error" (从最详细到最不详细)。
   # "info" 是生产环境的常用选择。
-  level: "info"
+  level: "trace"
   
   # 日志输出格式。
   # "text": 人类可读的文本格式，适合开发和调试。
