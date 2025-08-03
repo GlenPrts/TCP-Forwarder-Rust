@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::SelectorConfig;
 use crate::scorer::ScoreBoard;
-use crate::metrics::{self, METRICS};
+use crate::metrics::METRICS;
 
 /// 活跃远程地址集合，用于存储当前被选为最优的IP地址列表
 pub type ActiveRemotes = Arc<RwLock<Vec<IpAddr>>>;

@@ -18,7 +18,7 @@ logging:
   # 日志级别，决定了哪些日志会被记录。
   # 可选值: "trace", "debug", "info", "warn", "error" (从最详细到最不详细)。
   # "info" 是生产环境的常用选择。
-  level: "debug"
+  level: "info"
   
   # 日志输出格式。
   # "text": 人类可读的文本格式，适合开发和调试。
@@ -68,13 +68,13 @@ remotes:
   # 这取代了传统的健康检查，探测的目的是为了更新评分，而非简单判断死活。
   probing:
     # 对一组候选IP执行一次探测的周期。
-    interval: "15s"
+    interval: "5s"
     # 单次探测连接的TCP握手超时时间。
-    timeout: "2s"
+    timeout: "1s"
     # 每次探测时，选择多少个候选IP进行尝试。
     # 这可以避免对所有IP造成周期性压力，同时保证评分数据能逐步更新。
     # 系统会优先探测那些分数最陈旧或从未探测过的IP。
-    probe_candidate_count: 10
+    probe_candidate_count: 50
 
   # 评分模型 (Scoring Model): 基于探测和实际建连数据，为每个IP动态打分。
   scoring:

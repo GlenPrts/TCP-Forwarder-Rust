@@ -45,7 +45,7 @@ impl MetricsManager {
         let handle = recorder.handle();
 
         // 安装指标收集器
-        metrics::set_boxed_recorder(Box::new(recorder))
+        metrics::set_global_recorder(recorder)
             .map_err(|e| anyhow::anyhow!("安装指标收集器失败: {}", e))?;
 
         // 注册指标描述
@@ -92,41 +92,41 @@ impl MetricsManager {
 
     /// 记录新连接
     pub fn record_new_connection(&self) {
-        counter!("tcp_forwarder_connections_total", 1);
+        counter!("tcp_forwarder_connections_total").increment(1);
         let current = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
-        gauge!("tcp_forwarder_active_connections", current as f64);
+        gauge!("tcp_forwarder_active_connections").set(current as f64);
     }
 
     /// 记录连接结束
     pub fn record_connection_closed(&self) {
         let current = self.active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
-        gauge!("tcp_forwarder_active_connections", current.max(0) as f64);
+        gauge!("tcp_forwarder_active_connections").set(current.max(0) as f64);
     }
 
     /// 记录连接成功
     pub fn record_connection_success(&self) {
-        counter!("tcp_forwarder_connections_successful", 1);
+        counter!("tcp_forwarder_connections_successful").increment(1);
     }
 
     /// 记录连接失败
     pub fn record_connection_failed(&self) {
-        counter!("tcp_forwarder_connections_failed", 1);
-        counter!("tcp_forwarder_errors_total", 1);
+        counter!("tcp_forwarder_connections_failed").increment(1);
+        counter!("tcp_forwarder_errors_total").increment(1);
     }
 
     /// 记录连接建立耗时
     pub fn record_connection_duration(&self, duration: Duration) {
-        histogram!("tcp_forwarder_connection_duration_seconds", duration.as_secs_f64());
+        histogram!("tcp_forwarder_connection_duration_seconds").record(duration.as_secs_f64());
     }
 
     /// 记录连接池命中
     pub fn record_pool_hit(&self, _ip: &str) {
-        counter!("tcp_forwarder_pool_hits", 1);
+        counter!("tcp_forwarder_pool_hits").increment(1);
     }
 
     /// 记录连接池未命中
     pub fn record_pool_miss(&self, _ip: &str) {
-        counter!("tcp_forwarder_pool_misses", 1);
+        counter!("tcp_forwarder_pool_misses").increment(1);
     }
 
     /// 记录连接池中的连接数
@@ -137,36 +137,36 @@ impl MetricsManager {
 
     /// 记录连接池创建连接
     pub fn record_pool_connection_created(&self) {
-        counter!("tcp_forwarder_pool_connections_created", 1);
+        counter!("tcp_forwarder_pool_connections_created").increment(1);
     }
 
     /// 记录连接池创建连接失败
     pub fn record_pool_connection_failed(&self) {
-        counter!("tcp_forwarder_pool_connections_failed", 1);
+        counter!("tcp_forwarder_pool_connections_failed").increment(1);
     }
 
     /// 记录连接池连接重用
     pub fn record_pool_connection_reused(&self) {
-        counter!("tcp_forwarder_pool_connections_reused", 1);
+        counter!("tcp_forwarder_pool_connections_reused").increment(1);
     }
 
     /// 记录连接池连接关闭
     pub fn record_pool_connection_closed(&self) {
-        counter!("tcp_forwarder_pool_connections_closed", 1);
+        counter!("tcp_forwarder_pool_connections_closed").increment(1);
     }
 
     /// 记录连接池健康检查
     pub fn record_pool_health_check(&self, is_healthy: bool) {
         if is_healthy {
-            counter!("tcp_forwarder_pool_health_checks_passed", 1);
+            counter!("tcp_forwarder_pool_health_checks_passed").increment(1);
         } else {
-            counter!("tcp_forwarder_pool_health_checks_failed", 1);
+            counter!("tcp_forwarder_pool_health_checks_failed").increment(1);
         }
     }
 
     /// 记录活跃IP数量
     pub fn record_active_ips(&self, count: f64) {
-        gauge!("tcp_forwarder_active_ips", count);
+        gauge!("tcp_forwarder_active_ips").set(count);
     }
 
     /// 记录IP评分
@@ -177,37 +177,37 @@ impl MetricsManager {
 
     /// 记录IP探测
     pub fn record_ip_probe(&self, _ip: &str) {
-        counter!("tcp_forwarder_ip_probes_total", 1);
+        counter!("tcp_forwarder_ip_probes_total").increment(1);
     }
 
     /// 记录IP探测成功
     pub fn record_ip_probe_success(&self, _ip: &str) {
-        counter!("tcp_forwarder_ip_probes_successful", 1);
+        counter!("tcp_forwarder_ip_probes_successful").increment(1);
     }
 
     /// 记录IP探测失败
     pub fn record_ip_probe_failed(&self, _ip: &str) {
-        counter!("tcp_forwarder_ip_probes_failed", 1);
+        counter!("tcp_forwarder_ip_probes_failed").increment(1);
     }
 
     /// 记录探测耗时
     pub fn record_probe_duration(&self, duration: Duration) {
-        histogram!("tcp_forwarder_probe_duration_seconds", duration.as_secs_f64());
+        histogram!("tcp_forwarder_probe_duration_seconds").record(duration.as_secs_f64());
     }
 
     /// 记录传输字节数
     pub fn record_transfer_bytes(&self, bytes: u64) {
-        histogram!("tcp_forwarder_transfer_bytes", bytes as f64);
+        histogram!("tcp_forwarder_transfer_bytes").record(bytes as f64);
     }
 
     /// 记录运行时间
     pub fn record_uptime(&self, uptime_seconds: f64) {
-        gauge!("tcp_forwarder_uptime_seconds", uptime_seconds);
+        gauge!("tcp_forwarder_uptime_seconds").set(uptime_seconds);
     }
 
     /// 记录错误
     pub fn record_error(&self) {
-        counter!("tcp_forwarder_errors_total", 1);
+        counter!("tcp_forwarder_errors_total").increment(1);
     }
 }
 

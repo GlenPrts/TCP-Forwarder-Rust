@@ -2,7 +2,6 @@ use anyhow::Result;
 use dashmap::DashMap;
 use futures::future::try_join_all;
 use socket2::{TcpKeepalive};
-use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -347,11 +346,11 @@ pub async fn pool_manager_task(
 }
 
 /// 创建并管理所有远程IP的连接池
-#[instrument(skip(active_remotes, score_board))]
+#[instrument(skip(active_remotes, _score_board))]
 pub async fn initialize_pools(
     remotes_config: &RemotesConfig,
     active_remotes: ActiveRemotes,
-    score_board: ScoreBoard,
+    _score_board: ScoreBoard,
 ) -> Result<PoolManager> {
     let pool_manager = Arc::new(DashMap::new());
 

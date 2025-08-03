@@ -14,7 +14,7 @@ use std::time::Duration;
 // 删除未使用的导入
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use rand::seq::SliceRandom;
+use rand::prelude::*;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::copy_bidirectional;
 use tokio::signal;
@@ -363,7 +363,7 @@ async fn select_target_ip(active_remotes: &ActiveRemotes) -> Result<IpAddr> {
     // - least_connections: 选择当前活跃连接数最少的IP
     // - round_robin: 轮询选择
     // - random: 随机选择 (当前实现)
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     match ips.choose(&mut rng) {
         Some(ip) => {
             debug!("通过随机算法选择目标IP: {}", ip);

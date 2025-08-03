@@ -29,11 +29,4 @@ for thread in threads:
     thread.join()
 # 统计成功和失败的请求
 
-
-# for i in range(n):
-#     response = requests.get(url, headers=headers)
-#     if response.status_code == 200:
-#         success_count += 1
-#     else:
-#         fail_count += 1
-print(f"成功: {success_count}, 失败: {fail_count}, 总数: {n}")
+print(f"成功: {success_count}, 失败: {n - success_count}, 总数: {n}")

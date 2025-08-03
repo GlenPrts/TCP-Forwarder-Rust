@@ -1,6 +1,6 @@
 use crate::config::RemotesConfig;
 use crate::scorer::{ScoreBoard, ScoreData};
-use crate::metrics::{self, METRICS};
+use crate::metrics::METRICS;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;

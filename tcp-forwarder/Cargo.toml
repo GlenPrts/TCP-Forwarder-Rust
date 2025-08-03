@@ -10,7 +10,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 # 配置管理
-config = "0.13"
+config = "0.15"
 # 日志
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -19,17 +19,17 @@ humantime-serde = "1.1"
 # 错误处理
 anyhow = "1.0"
 # 并发数据结构
-dashmap = "5.4"
+dashmap = "6.1"
 # 随机数
-rand = "0.8"
+rand = "0.9"
 # 指标系统
-metrics = "0.21"
-metrics-exporter-prometheus = "0.12"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.17"
 # Web服务器
-axum = "0.7"
-tower = "0.4"
+axum = "0.8"
+tower = "0.5"
 # TCP socket配置
-socket2 = "0.5"
+socket2 = "0.6"
 # 异步utilities
 futures = "0.3"
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
