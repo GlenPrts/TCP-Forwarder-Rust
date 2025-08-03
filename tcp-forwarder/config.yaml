@@ -50,7 +50,7 @@ metrics:
 remotes:
   # 默认的远程服务器端口。
   # 当IP列表中没有指定端口时，将使用此端口进行探测和建立业务连接。
-  default_remote_port: 443
+  default_remote_port: 80
 
   # IP源提供者: 定义从哪里获取候选IP列表。
   provider:
