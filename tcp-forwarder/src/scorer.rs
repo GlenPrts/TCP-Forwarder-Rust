@@ -283,7 +283,7 @@ impl ScoreData {
             if let Some(latency) = latency {
                 let latency_ms = latency.as_millis() as f64;
                 
-                // 计算抖���：当前延迟与平均延迟的差异绝对值
+                // 计算抖动：当前延迟与平均延迟的差异绝对值
                 let old_latency = self.latency_ewma.value();
                 let jitter = (latency_ms - old_latency).abs();
                 
