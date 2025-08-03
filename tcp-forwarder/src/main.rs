@@ -205,6 +205,7 @@ async fn main() -> Result<()> {
                 let score_board_clone = score_board.clone();
                 let pool_manager_clone = pool_manager.clone();
                 let load_balancer_clone = load_balancer.clone();
+                let pool_config_clone = config.pools.clone();
                 
                 tokio::spawn(async move {
                     let result = handle_connection(
@@ -214,7 +215,8 @@ async fn main() -> Result<()> {
                         score_board_clone, 
                         pool_manager_clone, 
                         load_balancer_clone,
-                        remote_port_clone
+                        remote_port_clone,
+                        pool_config_clone
                     ).await;
                     
                     // 记录连接结束
@@ -329,6 +331,11 @@ fn load_ip_list(score_board: &scorer::ScoreBoard, config: &config::RemotesConfig
     
     info!("从文件加载IP列表: {:?}", file_path);
     
+    // 检查是否启用文件监控（当前仅记录，未来可实现热重载）
+    if file_config.watch {
+        info!("文件监控已启用，但当前版本暂不支持自动重载");
+    }
+    
     let file = File::open(file_path)
         .context(format!("无法打开IP列表文件: {:?}", file_path))?;
     
@@ -392,7 +399,7 @@ fn load_ip_list(score_board: &scorer::ScoreBoard, config: &config::RemotesConfig
 }
 
 /// 处理单个客户端连接
-#[instrument(skip(client_socket, active_remotes, score_board, pool_manager, load_balancer))]
+#[instrument(skip(client_socket, active_remotes, score_board, pool_manager, load_balancer, pool_config))]
 async fn handle_connection(
     mut client_socket: TcpStream, 
     client_addr: SocketAddr,
@@ -400,7 +407,8 @@ async fn handle_connection(
     score_board: scorer::ScoreBoard,
     pool_manager: pools::PoolManager,
     load_balancer: Arc<LoadBalancer>,
-    remote_port: u16
+    remote_port: u16,
+    pool_config: config::PoolsConfig
 ) -> Result<()> {
     // 使用负载均衡器选择目标IP
     let selected_ip = match load_balancer.select_target_ip(&active_remotes, Some(&pool_manager)).await {
@@ -439,8 +447,12 @@ async fn handle_connection(
             
             let start_time = std::time::Instant::now();
             
-            // 创建带keepalive的连接
-            match pools::create_connection_with_keepalive(selected_ip, remote_port).await {
+            // 创建带keepalive和配置超时的连接
+            match pools::create_connection_with_timeout_and_keepalive(
+                selected_ip, 
+                remote_port, 
+                pool_config.common.dial_timeout
+            ).await {
                 Ok(socket) => {
                     // 连接成功，更新分数和指标
                     let connect_time = start_time.elapsed();

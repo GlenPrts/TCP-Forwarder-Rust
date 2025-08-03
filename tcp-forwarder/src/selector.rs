@@ -230,6 +230,13 @@ async fn evaluate_and_select(
         let mut active = active_remotes.write().await;
         *active = candidate_ips.clone();
         *last_change_time = now; // 更新上次变更时间
+        
+        // 更新被选中的IP的最后选择时间
+        for ip in &candidate_ips {
+            if let Some(mut score_data) = score_board.get_mut(ip) {
+                score_data.update_last_selected();
+            }
+        }
     }
     
     Ok(IpChangeEvent {

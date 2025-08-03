@@ -133,11 +133,12 @@ impl ScoreData {
         // 应用失败惩罚（从基础分中扣除）
         let score_after_penalty = (base_score - self.failure_penalty).max(0.0);
         
-        // 应用历史稳定性奖励（但不超过100分上限）
-        let final_score = (score_after_penalty + self.historical_bonus).min(100.0);
+        // 应用历史稳定性奖励（但不超过理论最大分数）
+        let max_possible_score = config.latency.max_score + config.jitter.max_score + config.success_rate.max_score;
+        let final_score = (score_after_penalty + self.historical_bonus).min(max_possible_score);
         
-        // 确保分数在0-100范围内
-        final_score.clamp(0.0, 100.0)
+        // 确保分数在合理范围内
+        final_score.clamp(0.0, max_possible_score)
     }
 
     /// 获取总分（简化版本，归一化到0-100）
@@ -202,7 +203,7 @@ impl ScoreData {
         } else {
             (max_latency_ms - latency_ms) / (max_latency_ms - base_latency_ms)
         };
-        let latency_score = latency_normalized * config.weights.latency * 100.0;
+        let latency_score = latency_normalized * config.latency.max_score * config.weights.latency;
 
         let jitter_ms = self.jitter_ewma.value();
         let base_jitter_ms = config.jitter.base_jitter.as_millis() as f64;
@@ -215,14 +216,15 @@ impl ScoreData {
         } else {
             (max_jitter_ms - jitter_ms) / (max_jitter_ms - base_jitter_ms)
         };
-        let jitter_score = jitter_normalized * config.weights.jitter * 100.0;
+        let jitter_score = jitter_normalized * config.jitter.max_score * config.weights.jitter;
 
         let success_rate = self.success_rate_ewma.value().clamp(0.0, 1.0);
-        let success_score = success_rate * config.weights.success_rate * 100.0;
+        let success_score = success_rate * config.success_rate.max_score * config.weights.success_rate;
 
         let base_score = latency_score + jitter_score + success_score;
         let score_after_penalty = (base_score - self.failure_penalty).max(0.0);
-        let final_score = (score_after_penalty + self.historical_bonus).min(100.0).clamp(0.0, 100.0);
+        let max_possible_score = config.latency.max_score + config.jitter.max_score + config.success_rate.max_score;
+        let final_score = (score_after_penalty + self.historical_bonus).min(max_possible_score).clamp(0.0, max_possible_score);
 
         ScoreDetails {
             ip: self.ip,
@@ -335,12 +337,18 @@ impl ScoreData {
             }
         }
     }
+
+    /// 更新最后被选中的时间
+    pub fn update_last_selected(&mut self) {
+        self.last_selected = Some(Instant::now());
+    }
 }
 
 /// 评分详情结构体，用于调试和监控
 #[derive(Debug, Clone)]
 pub struct ScoreDetails {
     pub ip: IpAddr,
+    #[allow(dead_code)]
     pub port: u16,
     pub latency_ms: f64,
     pub latency_score: f64,
@@ -348,6 +356,7 @@ pub struct ScoreDetails {
     pub jitter_score: f64,
     pub success_rate: f64,
     pub success_score: f64,
+    #[allow(dead_code)]
     pub base_score: f64,
     pub failure_penalty: f64,
     pub historical_bonus: f64,

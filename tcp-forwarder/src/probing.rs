@@ -92,15 +92,26 @@ pub async fn probing_task(
     
     // 创建一个定时器，按照配置的间隔执行
     let mut timer = interval(config.probing.interval);
+    let mut probe_cycle = 0u64;
     
     loop {
         // 等待下一个时间间隔
         timer.tick().await;
+        probe_cycle += 1;
         
         // 选择需要探测的IP
         let candidates = select_probe_candidates(&score_board, config.probing.probe_candidate_count);
         
         debug!("本轮选择了 {} 个IP进行探测", candidates.len());
+        
+        // 每10个周期输出一次详细的评分信息用于调试
+        if probe_cycle % 10 == 0 {
+            debug!("探测周期 #{}, 开始输出详细评分信息:", probe_cycle);
+            for (_ip, score_data) in &candidates {
+                let details = score_data.get_score_details(&config.scoring);
+                debug!("详细评分: {}", details.format());
+            }
+        }
         
         // 对每个候选IP进行探测
         for (ip, score_data) in candidates {

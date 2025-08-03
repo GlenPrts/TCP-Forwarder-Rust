@@ -122,6 +122,7 @@ fn default_initial_concurrency() -> usize {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScoringConfig {
     /// 权重配置
+    #[allow(dead_code)]
     pub weights: ScoringWeightsConfig,
     /// 延迟评分配置
     pub latency: LatencyConfig,
@@ -139,10 +140,13 @@ pub struct ScoringConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScoringWeightsConfig {
     /// 延迟权重
+    #[allow(dead_code)]
     pub latency: f64,
     /// 抖动权重
+    #[allow(dead_code)]
     pub jitter: f64,
     /// 成功率权重
+    #[allow(dead_code)]
     pub success_rate: f64,
 }
 
@@ -253,6 +257,7 @@ pub struct PoolCommonConfig {
     pub idle_timeout: std::time::Duration,
     /// 排空超时
     #[serde(with = "humantime_serde")]
+    #[allow(dead_code)]
     pub drain_timeout: std::time::Duration,
 }
 

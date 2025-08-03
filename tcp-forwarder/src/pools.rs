@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, Context};
 use dashmap::DashMap;
 use futures::future::try_join_all;
 use socket2::{TcpKeepalive};
@@ -12,6 +12,8 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, instrument, trace, warn};
+
+use crate::config::PoolCommonConfig;
 
 use crate::config::{RemotesConfig, DynamicStrategyConfig, ScalingConfig};
 use crate::metrics::METRICS;
@@ -65,6 +67,7 @@ impl PoolStats {
     }
 
     /// 记录连接被释放（从活跃变为可用或关闭）
+    #[allow(dead_code)]
     pub fn record_connection_released(&self, returned_to_pool: bool) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
         if returned_to_pool {
@@ -109,6 +112,7 @@ pub struct PooledConnection {
     /// TCP连接
     pub stream: TcpStream,
     /// 连接创建时间
+    #[allow(dead_code)]
     pub created_at: Instant,
     /// 最后一次活跃时间
     pub last_active: Instant,
@@ -150,12 +154,19 @@ pub struct PoolState {
     /// 动态连接池统计信息
     pub stats: PoolStats,
     /// 动态策略配置
+    #[allow(dead_code)]
     pub dynamic_config: Option<Arc<DynamicStrategyConfig>>,
+    /// 池通用配置
+    pub common_config: Arc<PoolCommonConfig>,
 }
 
 impl PoolState {
     /// 创建新的连接池状态
-    pub fn new(buffer_size: usize, dynamic_config: Option<Arc<DynamicStrategyConfig>>) -> Self {
+    pub fn new(
+        buffer_size: usize, 
+        dynamic_config: Option<Arc<DynamicStrategyConfig>>,
+        common_config: Arc<PoolCommonConfig>
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(buffer_size);
         Self {
             sender,
@@ -163,6 +174,7 @@ impl PoolState {
             is_active: Arc::new(tokio::sync::RwLock::new(true)),
             stats: PoolStats::new(),
             dynamic_config,
+            common_config,
         }
     }
 
@@ -186,8 +198,9 @@ pub async fn create_pool_for_ip(
     pool_size: usize,
     buffer_size: usize,
     dynamic_config: Option<Arc<DynamicStrategyConfig>>,
+    common_config: Arc<PoolCommonConfig>,
 ) {
-    let pool_state = PoolState::new(buffer_size, dynamic_config.clone());
+    let pool_state = PoolState::new(buffer_size, dynamic_config.clone(), common_config);
     pools.insert(ip, pool_state);
 
     if let Some(pool_state_ref) = pools.get(&ip) {
@@ -268,6 +281,7 @@ async fn dynamic_scaling_task(
                 
                 // 记录指标
                 METRICS.record_pool_scaled_up(ip.to_string(), scale_up_count);
+                METRICS.record_pool_size(&ip.to_string(), (current_total + scale_up_count) as f64);
             }
         } else if target_size < current_total && current_available > dynamic_config.scaling.scale_down_increment {
             // 需要缩容（只有当可用连接数足够时才缩容）
@@ -279,11 +293,16 @@ async fn dynamic_scaling_task(
                 
                 // 记录指标
                 METRICS.record_pool_scaled_down(ip.to_string(), scale_down_count);
+                METRICS.record_pool_size(&ip.to_string(), (current_total - scale_down_count) as f64);
             }
         }
         
         // 更新池大小指标
         METRICS.record_pool_statistics(ip.to_string(), current_total, current_available, current_active);
+        
+        // 记录峰值并发指标
+        let peak_concurrency = pool_state.stats.get_recent_peak_concurrency().await;
+        METRICS.record_pool_peak_concurrency(ip.to_string(), peak_concurrency);
     }
     
     info!("动态伸缩任务停止，IP: {}", ip);
@@ -295,8 +314,9 @@ async fn scale_up_pool(ip: IpAddr, port: u16, pool_state: &PoolState, count: usi
         .map(|_| {
             let sender = pool_state.sender.clone();
             let stats = pool_state.stats.clone();
+            let timeout = pool_state.common_config.dial_timeout;
             tokio::spawn(async move {
-                match create_connection_with_keepalive(ip, port).await {
+                match create_connection_with_timeout_and_keepalive(ip, port, timeout).await {
                     Ok(stream) => {
                         let connection = PooledConnection::new(stream);
                         if sender.send(connection).await.is_ok() {
@@ -387,8 +407,9 @@ async fn dynamic_filler_task(
                 .map(|_| {
                     let sender = pool_state.sender.clone();
                     let stats = pool_state.stats.clone();
+                    let timeout = pool_state.common_config.dial_timeout;
                     tokio::spawn(async move {
-                        match create_connection_with_keepalive(ip, port).await {
+                        match create_connection_with_timeout_and_keepalive(ip, port, timeout).await {
                             Ok(stream) => {
                                 let connection = PooledConnection::new(stream);
                                 if sender.send(connection).await.is_ok() {
@@ -432,7 +453,6 @@ async fn dynamic_filler_task(
 /// 连接池健康检查任务
 async fn health_check_task(pool_state: PoolState) {
     const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-    const MAX_IDLE_TIME: Duration = Duration::from_secs(120);
 
     let mut interval = interval(HEALTH_CHECK_INTERVAL);
 
@@ -441,10 +461,11 @@ async fn health_check_task(pool_state: PoolState) {
 
         let mut receiver = pool_state.receiver.lock().await;
         let mut valid_connections = Vec::new();
+        let idle_timeout = pool_state.common_config.idle_timeout;
 
         // 取出所有连接进行检查
         while let Ok(mut connection) = receiver.try_recv() {
-            if !connection.is_expired(MAX_IDLE_TIME) {
+            if !connection.is_expired(idle_timeout) {
                 // 检查连接是否还有效（简单的可读性检查）
                 if is_connection_healthy(&mut connection.stream).await {
                     connection.touch();
@@ -504,8 +525,9 @@ async fn filler_task(ip: IpAddr, port: u16, pool_state: PoolState, target_size: 
             let tasks: Vec<_> = (0..needed)
                 .map(|_| {
                     let sender = pool_state.sender.clone();
+                    let timeout = pool_state.common_config.dial_timeout;
                     tokio::spawn(async move {
-                        match create_connection_with_keepalive(ip, port).await {
+                        match create_connection_with_timeout_and_keepalive(ip, port, timeout).await {
                             Ok(stream) => {
                                 let connection = PooledConnection::new(stream);
                                 if sender.send(connection).await.is_ok() {
@@ -548,11 +570,24 @@ async fn filler_task(ip: IpAddr, port: u16, pool_state: PoolState, target_size: 
 }
 
 /// 创建带TCP keepalive的连接
+#[allow(dead_code)]
 pub async fn create_connection_with_keepalive(ip: IpAddr, port: u16) -> anyhow::Result<TcpStream> {
+    create_connection_with_timeout_and_keepalive(ip, port, Duration::from_secs(1)).await
+}
+
+/// 创建带TCP keepalive和超时的连接
+pub async fn create_connection_with_timeout_and_keepalive(
+    ip: IpAddr, 
+    port: u16, 
+    timeout: Duration
+) -> anyhow::Result<TcpStream> {
     let addr = SocketAddr::new(ip, port);
 
-    // 先创建标准连接
-    let stream = TcpStream::connect(addr).await?;
+    // 使用超时创建连接
+    let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+        .await
+        .map_err(|_| anyhow::anyhow!("连接超时"))?
+        .context("连接失败")?;
 
     // 获取底层socket并设置keepalive
     let socket = socket2::Socket::from(stream.into_std()?);
@@ -609,6 +644,7 @@ pub async fn get_connection_from_pool(
 }
 
 /// 将连接返回到连接池
+#[allow(dead_code)]
 pub async fn return_connection_to_pool(
     pool_manager: &PoolManager,
     ip: IpAddr,
@@ -713,6 +749,7 @@ pub async fn pool_manager_task(
                     pool_size,
                     buffer_size,
                     dynamic_config,
+                    Arc::new(pools_config.common.clone()),
                 ).await;
             }
         }
@@ -748,6 +785,7 @@ pub async fn pool_manager_task(
 }
 
 /// 创建并管理所有远程IP的连接池
+#[allow(dead_code)]
 #[instrument(skip(active_remotes, _score_board, pools_config))]
 pub async fn initialize_pools(
     remotes_config: &RemotesConfig,
@@ -795,9 +833,10 @@ pub async fn initialize_pools(
             let ip = *ip;
             let port = remotes_config.default_remote_port;
             let dynamic_config_clone = dynamic_config.clone();
+            let common_config_clone = Arc::new(pools_config.common.clone());
 
             tokio::spawn(async move {
-                create_pool_for_ip(ip, port, pools, pool_size, buffer_size, dynamic_config_clone).await;
+                create_pool_for_ip(ip, port, pools, pool_size, buffer_size, dynamic_config_clone, common_config_clone).await;
             })
         })
         .collect();
@@ -813,6 +852,7 @@ pub async fn initialize_pools(
 }
 
 /// 停止所有连接池
+#[allow(dead_code)]
 pub async fn shutdown_pools(pool_manager: &PoolManager) {
     info!("开始停止所有连接池");
 
@@ -825,30 +865,4 @@ pub async fn shutdown_pools(pool_manager: &PoolManager) {
     }
 
     info!("所有连接池已停止");
-}
-
-/// 检查连接是否活跃
-async fn is_connection_alive(stream: &TcpStream) -> bool {
-    // 尝试读取一个字节但不移除它，如果连接关闭会立即返回错误
-    match stream.ready(tokio::io::Interest::READABLE).await {
-        Ok(_) => {
-            // 连接可读，但这可能意味着有数据或连接已关闭
-            // 我们需要尝试实际读取来确定
-            let mut buf = [0u8; 1];
-            match stream.try_read(&mut buf) {
-                Ok(0) => false,  // 读取到0字节表示连接已关闭
-                Ok(_) => {
-                    // 读取到数据，但这在我们的场景下不应该发生
-                    // 因为我们期望的是空闲连接
-                    true
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // 没有数据可读，连接仍然活跃
-                    true
-                }
-                Err(_) => false, // 其他错误表示连接有问题
-            }
-        }
-        Err(_) => false, // 连接不可用
-    }
 }
