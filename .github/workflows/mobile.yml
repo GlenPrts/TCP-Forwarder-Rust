@@ -1,16 +1,16 @@
 name: Mobile Platforms Build
 
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'tcp-forwarder/**'
-      - '.github/workflows/mobile.yml'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'tcp-forwarder/**'
-      - '.github/workflows/mobile.yml'
+  # push:
+  #   branches: [ main, develop ]
+  #   paths:
+  #     - 'tcp-forwarder/**'
+  #     - '.github/workflows/mobile.yml'
+  # pull_request:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'tcp-forwarder/**'
+  #     - '.github/workflows/mobile.yml'
   workflow_dispatch:
 
 env:

@@ -6,10 +6,10 @@
 name: Performance Monitoring
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  # push:
+  #   branches: [ main ]
+  # pull_request:
+  #   branches: [ main ]
   # schedule:
   #   - cron: '0 6 * * *' # 每天 UTC 06:00 运行性能监控
   workflow_dispatch:

@@ -7,17 +7,17 @@
 name: Docker Build
 
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'Dockerfile'
-      - 'tcp-forwarder/**'
-      - '.github/workflows/docker.yml'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'Dockerfile'
-      - 'tcp-forwarder/**'
+  # push:
+  #   branches: [ main, develop ]
+  #   paths:
+  #     - 'Dockerfile'
+  #     - 'tcp-forwarder/**'
+  #     - '.github/workflows/docker.yml'
+  # pull_request:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'Dockerfile'
+  #     - 'tcp-forwarder/**'
   # schedule:
   #   - cron: '0 6 * * 1' # 每周构建一次以获取基础镜像更新
   workflow_dispatch:
