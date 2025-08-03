@@ -5,10 +5,11 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
-  schedule:
-    # 每天 UTC 02:00 运行全面扫描
-    - cron: '0 2 * * *'
-
+  # schedule:
+  #   # 每天 UTC 02:00 运行全面扫描
+  #   - cron: '0 2 * * *'
+  workflow_dispatch: # 允许手动触发
+  
 env:
   CARGO_TERM_COLOR: always
 

@@ -1,9 +1,9 @@
 name: Dependency Updates
 
 on:
-  schedule:
-    # 每周一 UTC 08:00 运行
-    - cron: '0 8 * * 1'
+  # schedule:
+  #   # 每周一 UTC 08:00 运行
+  #   - cron: '0 8 * * 1'
   workflow_dispatch: # 允许手动触发
 
 jobs:
@@ -11,10 +11,10 @@ jobs:
     name: Update Rust Dependencies
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # - name: Checkout code
+      #   uses: actions/checkout@v4
+      #   with:
+      #     token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

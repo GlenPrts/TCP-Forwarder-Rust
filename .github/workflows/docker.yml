@@ -12,9 +12,10 @@ on:
     paths:
       - 'Dockerfile'
       - 'tcp-forwarder/**'
-  schedule:
-    # 每周构建一次以获取基础镜像更新
-    - cron: '0 6 * * 1'
+  # schedule:
+  #   # 每周构建一次以获取基础镜像更新
+  #   - cron: '0 6 * * 1'
+  workflow_dispatch: # 允许手动触发
 
 env:
   REGISTRY: ghcr.io

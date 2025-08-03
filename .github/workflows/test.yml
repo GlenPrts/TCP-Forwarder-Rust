@@ -5,9 +5,7 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
-  schedule:
-    # 每天UTC 02:00运行测试
-    - cron: '0 2 * * *'
+  workflow_dispatch: # 允许手动触发
 
 env:
   CARGO_TERM_COLOR: always
