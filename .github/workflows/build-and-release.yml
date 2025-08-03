@@ -1,6 +1,6 @@
 # Build and Release
 #
-# 本工作流自动化代码质量检查、多平台构建、Docker镜像、发布、以及安全扫描。
+# 本工作流自动化代码质量检查、多平台构建和发布。
 #
 # 支持主分支、开发分支、tag发布、PR触发。
 
@@ -15,8 +15,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   # 1. 代码质量检查
@@ -206,57 +204,10 @@ jobs:
           path: dist/${{ matrix.name }}
           retention-days: 7
 
-  # # 3. 构建并推送 Docker 镜像（多平台）
-  # build-docker:
-  #   name: 构建并推送 Docker 镜像
-  #   needs: quality-check
-  #   runs-on: ubuntu-latest
-  #   permissions:
-  #     contents: read
-  #     packages: write
-  #   steps:
-  #     - name: 拉取代码
-  #       uses: actions/checkout@v4
-
-  #     - name: 设置 Docker Buildx
-  #       uses: docker/setup-buildx-action@v3
-
-  #     - name: 登录容器仓库
-  #       if: github.event_name != 'pull_request'
-  #       uses: docker/login-action@v3
-  #       with:
-  #         registry: ${{ env.REGISTRY }}
-  #         username: ${{ github.actor }}
-  #         password: ${{ secrets.GITHUB_TOKEN }}
-
-  #     - name: 提取镜像元数据
-  #       id: meta
-  #       uses: docker/metadata-action@v5
-  #       with:
-  #         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-  #         tags: |
-  #           type=ref,event=branch
-  #           type=ref,event=pr
-  #           type=semver,pattern={{version}}
-  #           type=semver,pattern={{major}}.{{minor}}
-  #           type=semver,pattern={{major}}
-  #           type=raw,value=latest,enable={{is_default_branch}}
-
-  #     - name: 构建并推送 Docker 镜像
-  #       uses: docker/build-push-action@v5
-  #       with:
-  #         context: .
-  #         platforms: linux/amd64,linux/arm64
-  #         push: ${{ github.event_name != 'pull_request' }}
-  #         tags: ${{ steps.meta.outputs.tags }}
-  #         labels: ${{ steps.meta.outputs.labels }}
-  #         cache-from: type=gha
-  #         cache-to: type=gha,mode=max
-
-  # 4. 发布 Release
+  # 3. 发布 Release
   release:
     name: 发布 Release
-    # needs: [build-binaries, build-docker]
+    needs: build-binaries
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -314,12 +265,6 @@ jobs:
             - **macOS (Intel)**: `tcp-forwarder-macos-amd64.tar.gz`
             - **macOS (Apple Silicon)**: `tcp-forwarder-macos-arm64.tar.gz`
             
-            ### Docker镜像
-            ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            docker pull ghcr.io/${{ github.repository }}:latest
-            ```
-            
             ## 📋 更新日志
             
             ${{ steps.changelog.outputs.changelog }}
@@ -330,36 +275,6 @@ jobs:
             2. 解压：`tar -xzf tcp-forwarder-*.tar.gz`
             3. 配置：复制并修改 `config.yaml`
             4. 运行：`./tcp-forwarder --config config.yaml`
-            
-            或使用Docker：
-            ```bash
-            docker run -d --name tcp-forwarder \
-              -p 1234:1234 -p 9099:9099 \
-              -v $(pwd)/config.yaml:/app/config/config.yaml:ro \
-              ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ```
           files: dist/*.tar.gz
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
-
-  # # 5. Docker 镜像安全扫描
-  # security-scan:
-  #   name: Docker 镜像安全扫描
-  #   needs: build-docker
-  #   runs-on: ubuntu-latest
-  #   if: github.event_name != 'pull_request'
-  #   permissions:
-  #     security-events: write
-  #   steps:
-  #     - name: 运行 Trivy 镜像漏洞扫描
-  #       uses: aquasecurity/trivy-action@master
-  #       with:
-  #         image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-  #         format: 'sarif'
-  #         output: 'trivy-results.sarif'
-
-  #     - name: 上传 Trivy 扫描结果
-  #       uses: github/codeql-action/upload-sarif@v3
-  #       if: always()
-  #       with:
-  #         sarif_file: 'trivy-results.sarif'
