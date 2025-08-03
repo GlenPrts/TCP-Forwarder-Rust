@@ -256,7 +256,7 @@ jobs:
   # 4. 发布 Release
   release:
     name: 发布 Release
-    needs: [build-binaries, build-docker]
+    # needs: [build-binaries, build-docker]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
