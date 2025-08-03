@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+          body: |
+            ## 🚀 TCP Forwarder Release ${{ github.ref }}
+            
+            ### 📦 下载
+            
+            请从下方的 Assets 部分下载适合您平台的二进制文件。
+            
+            #### 桌面平台
+            - **Linux**: `tcp-forwarder-linux-*`
+            - **Windows**: `tcp-forwarder-windows-*`
+            - **macOS**: `tcp-forwarder-macos-*`
+            
+            #### 📱 移动平台
+            - **Android**: `tcp-forwarder-android-*`
+            - **iOS**: `tcp-forwarder-ios-*`
+            
+            ### 🔧 安装和使用
+            
+            #### 桌面平台
+            1. 下载对应平台的二进制文件
+            2. 解压并放置到 PATH 中
+            3. 创建配置文件 `config.yaml`
+            4. 运行 `tcp-forwarder --config config.yaml`
+            
+            #### 📱 移动平台
+            请查看移动平台包中的详细说明文档。
+            
+            ### 📋 变更日志
+            
+            详细变更请查看 [CHANGELOG.md](./CHANGELOG.md)
+            
+            ### 🐳 Docker
+            
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+
+  build-release:
+    name: Build Release Binaries
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          # 桌面平台
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-linux-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: tcp-forwarder.exe
+            asset_name: tcp-forwarder-windows-x86_64.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-macos-aarch64
+          # Android 平台
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-android-aarch64
+          - os: ubuntu-latest
+            target: armv7-linux-androideabi
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-android-armv7
+          - os: ubuntu-latest
+            target: x86_64-linux-android
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-android-x86_64
+          # iOS 平台
+          - os: macos-latest
+            target: aarch64-apple-ios
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-ios-aarch64
+          - os: macos-latest
+            target: x86_64-apple-ios
+            artifact_name: tcp-forwarder
+            asset_name: tcp-forwarder-ios-x86_64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross compilation tools
+        run: |
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              sudo apt-get update
+              sudo apt-get install -y gcc-aarch64-linux-gnu
+              ;;
+            *-android)
+              # 安装 Android NDK
+              if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+                wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+                unzip -q android-ndk-r25c-linux.zip
+                export ANDROID_NDK_HOME=$PWD/android-ndk-r25c
+                echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+                echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+              fi
+              ;;
+            *-apple-ios)
+              # iOS 工具已经在 macOS runner 中预装
+              xcode-select --install 2>/dev/null || true
+              ;;
+          esac
+
+      - name: Configure Android environment
+        if: contains(matrix.target, 'android')
+        run: |
+          case "${{ matrix.target }}" in
+            aarch64-linux-android)
+              echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" >> $GITHUB_ENV
+              ;;
+            armv7-linux-androideabi)
+              echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+              ;;
+            x86_64-linux-android)
+              echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: Build
+        run: |
+          cd tcp-forwarder
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: tcp-forwarder/target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          asset_name: ${{ matrix.asset_name }}
+          asset_content_type: application/octet-stream

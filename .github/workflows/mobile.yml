@@ -1,0 +1,438 @@
+name: Mobile Platforms Build
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'tcp-forwarder/**'
+      - '.github/workflows/mobile.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'tcp-forwarder/**'
+      - '.github/workflows/mobile.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-android:
+    name: Build for Android (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-android
+          - armv7-linux-androideabi
+          - i686-linux-android
+          - x86_64-linux-android
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+          add-to-path: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tcp-forwarder/target
+          key: android-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Configure Android environment
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
+          
+          case "${{ matrix.target }}" in
+            aarch64-linux-android)
+              echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_aarch64_linux_android=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CXX_aarch64_linux_android=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++" >> $GITHUB_ENV
+              ;;
+            armv7-linux-androideabi)
+              echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+              echo "CC_armv7_linux_androideabi=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+              echo "CXX_armv7_linux_androideabi=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang++" >> $GITHUB_ENV
+              ;;
+            i686-linux-android)
+              echo "CARGO_TARGET_I686_LINUX_ANDROID_LINKER=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_i686_linux_android=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang" >> $GITHUB_ENV
+              echo "CXX_i686_linux_android=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android21-clang++" >> $GITHUB_ENV
+              ;;
+            x86_64-linux-android)
+              echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_x86_64_linux_android=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CXX_x86_64_linux_android=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang++" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: Build for Android
+        run: |
+          cd tcp-forwarder
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Verify build
+        run: |
+          ls -la tcp-forwarder/target/${{ matrix.target }}/release/
+          file tcp-forwarder/target/${{ matrix.target }}/release/tcp-forwarder
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcp-forwarder-android-${{ matrix.target }}
+          path: tcp-forwarder/target/${{ matrix.target }}/release/tcp-forwarder
+
+  build-ios:
+    name: Build for iOS (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-ios      # iPhone (ARM64)
+          - x86_64-apple-ios       # iOS Simulator (Intel)
+          - aarch64-apple-ios-sim  # iOS Simulator (Apple Silicon)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tcp-forwarder/target
+          key: ios-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install iOS development tools
+        run: |
+          # 确保安装了 Xcode 命令行工具
+          xcode-select --install 2>/dev/null || true
+          
+          # 显示可用的 iOS SDK
+          xcrun --show-sdk-path --sdk iphoneos
+          xcrun --show-sdk-path --sdk iphonesimulator
+
+      - name: Build for iOS
+        run: |
+          cd tcp-forwarder
+          
+          # 设置 iOS SDK 路径
+          case "${{ matrix.target }}" in
+            aarch64-apple-ios)
+              export IPHONEOS_DEPLOYMENT_TARGET=12.0
+              ;;
+            x86_64-apple-ios|aarch64-apple-ios-sim)
+              export IPHONEOS_DEPLOYMENT_TARGET=12.0
+              ;;
+          esac
+          
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Verify build
+        run: |
+          ls -la tcp-forwarder/target/${{ matrix.target }}/release/
+          file tcp-forwarder/target/${{ matrix.target }}/release/tcp-forwarder
+
+      - name: Upload iOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcp-forwarder-ios-${{ matrix.target }}
+          path: tcp-forwarder/target/${{ matrix.target }}/release/tcp-forwarder
+
+  create-mobile-package:
+    name: Create Mobile Package
+    needs: [build-android, build-ios]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all mobile artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tcp-forwarder-*
+          path: mobile-binaries
+
+      - name: Create mobile package structure
+        run: |
+          mkdir -p mobile-package/{android,ios,docs}
+          
+          # 组织 Android 二进制文件
+          if [ -d "mobile-binaries" ]; then
+            find mobile-binaries -name "*android*" -type d | while read dir; do
+              target=$(basename "$dir" | sed 's/tcp-forwarder-android-//')
+              if [ -f "$dir/tcp-forwarder" ]; then
+                cp "$dir/tcp-forwarder" "mobile-package/android/tcp-forwarder-$target"
+              fi
+            done
+            
+            # 组织 iOS 二进制文件
+            find mobile-binaries -name "*ios*" -type d | while read dir; do
+              target=$(basename "$dir" | sed 's/tcp-forwarder-ios-//')
+              if [ -f "$dir/tcp-forwarder" ]; then
+                cp "$dir/tcp-forwarder" "mobile-package/ios/tcp-forwarder-$target"
+              fi
+            done
+          fi
+
+      - name: Create mobile documentation
+        run: |
+          cat > mobile-package/README.md << 'EOF'
+          # TCP Forwarder - 移动平台构建
+
+          ## 📱 支持的平台
+
+          ### Android
+          - `aarch64-linux-android` - ARM64 设备 (大多数现代 Android 设备)
+          - `armv7-linux-androideabi` - ARMv7 设备 (较老的 Android 设备)
+          - `i686-linux-android` - x86 设备 (模拟器和一些平板)
+          - `x86_64-linux-android` - x86_64 设备 (模拟器和一些设备)
+
+          ### iOS
+          - `aarch64-apple-ios` - iPhone/iPad (ARM64)
+          - `x86_64-apple-ios` - iOS 模拟器 (Intel Mac)
+          - `aarch64-apple-ios-sim` - iOS 模拟器 (Apple Silicon Mac)
+
+          ## 🚀 使用说明
+
+          ### Android 部署
+          1. 选择适合您设备架构的二进制文件
+          2. 通过 ADB 推送到设备：
+             ```bash
+             adb push tcp-forwarder-aarch64-linux-android /data/local/tmp/tcp-forwarder
+             adb shell chmod +x /data/local/tmp/tcp-forwarder
+             ```
+          3. 创建配置文件并运行
+
+          ### iOS 部署
+          1. 这些是静态库文件，需要集成到 iOS 应用中
+          2. 或者在越狱设备上直接运行
+
+          ## ⚠️ 注意事项
+
+          ### Android
+          - 需要网络权限
+          - 某些功能可能需要 root 权限
+          - 建议在 API 级别 21+ 上运行
+
+          ### iOS
+          - 需要在越狱设备上运行，或集成到应用中
+          - 需要网络权限声明
+          - 遵循 App Store 政策（如果发布应用）
+
+          ## 🔧 配置
+
+          移动平台的配置文件格式与桌面版本相同，但请注意：
+          - 文件路径需要适配移动平台
+          - 端口绑定可能受到系统限制
+          - 某些高端口需要特殊权限
+          EOF
+
+          cat > mobile-package/docs/android-integration.md << 'EOF'
+          # Android 集成指南
+
+          ## 🛠️ 集成方式
+
+          ### 1. 独立二进制文件
+          ```bash
+          # 推送到设备
+          adb push tcp-forwarder-aarch64-linux-android /data/local/tmp/tcp-forwarder
+          adb shell chmod +x /data/local/tmp/tcp-forwarder
+
+          # 运行
+          adb shell '/data/local/tmp/tcp-forwarder --config /sdcard/config.yaml'
+          ```
+
+          ### 2. Android 应用集成
+          使用 JNI 将 Rust 代码集成到 Android 应用中：
+
+          #### build.gradle 配置
+          ```gradle
+          android {
+              defaultConfig {
+                  ndk {
+                      abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
+                  }
+              }
+          }
+          ```
+
+          #### 权限声明 (AndroidManifest.xml)
+          ```xml
+          <uses-permission android:name="android.permission.INTERNET" />
+          <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+          <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+          ```
+
+          ## 📱 设备兼容性
+
+          | 架构 | 设备示例 |
+          |------|----------|
+          | arm64-v8a | 大多数现代 Android 设备 |
+          | armeabi-v7a | 较老的 Android 设备 |
+          | x86 | Android 模拟器，部分平板 |
+          | x86_64 | Android 模拟器，部分设备 |
+
+          ## 🔧 配置注意事项
+
+          - 配置文件路径：`/sdcard/tcp-forwarder/config.yaml`
+          - 日志文件路径：`/sdcard/tcp-forwarder/logs/`
+          - 绑定端口：避免使用系统保留端口 (1-1024)
+          EOF
+
+          cat > mobile-package/docs/ios-integration.md << 'EOF'
+          # iOS 集成指南
+
+          ## 🛠️ 集成方式
+
+          ### 1. 越狱设备使用
+          ```bash
+          # 通过 SSH 或文件管理器上传
+          scp tcp-forwarder-aarch64-apple-ios root@device:/usr/local/bin/tcp-forwarder
+          ssh root@device 'chmod +x /usr/local/bin/tcp-forwarder'
+
+          # 运行
+          ssh root@device '/usr/local/bin/tcp-forwarder --config /var/mobile/config.yaml'
+          ```
+
+          ### 2. iOS 应用集成
+          创建 C 绑定以在 iOS 应用中使用：
+
+          #### Info.plist 权限
+          ```xml
+          <key>NSAppTransportSecurity</key>
+          <dict>
+              <key>NSAllowsArbitraryLoads</key>
+              <true/>
+          </dict>
+          ```
+
+          #### Swift 集成示例
+          ```swift
+          import Foundation
+
+          class TCPForwarder {
+              func start(configPath: String) {
+                  // 调用 Rust 函数
+              }
+          }
+          ```
+
+          ## 📱 设备兼容性
+
+          | 目标 | 用途 |
+          |------|------|
+          | aarch64-apple-ios | 真实设备 (iPhone/iPad) |
+          | x86_64-apple-ios | 模拟器 (Intel Mac) |
+          | aarch64-apple-ios-sim | 模拟器 (Apple Silicon Mac) |
+
+          ## 🔧 配置注意事项
+
+          - 配置文件路径：`Documents/tcp-forwarder/config.yaml`
+          - 沙盒限制：只能访问应用沙盒内的文件
+          - 网络权限：需要在 Info.plist 中声明
+          - 后台运行：可能受到 iOS 后台限制
+          EOF
+
+          # 创建构建信息
+          cat > mobile-package/BUILD_INFO.txt << EOF
+          构建时间: $(date)
+          Git 提交: ${GITHUB_SHA:-"unknown"}
+          构建分支: ${GITHUB_REF_NAME:-"unknown"}
+          
+          Android 目标:
+          - aarch64-linux-android
+          - armv7-linux-androideabi
+          - i686-linux-android
+          - x86_64-linux-android
+          
+          iOS 目标:
+          - aarch64-apple-ios
+          - x86_64-apple-ios
+          - aarch64-apple-ios-sim
+          EOF
+
+      - name: Package mobile binaries
+        run: |
+          tar -czf tcp-forwarder-mobile-platforms.tar.gz mobile-package/
+
+      - name: Upload mobile package
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcp-forwarder-mobile-package
+          path: |
+            tcp-forwarder-mobile-platforms.tar.gz
+            mobile-package/
+
+  test-mobile-builds:
+    name: Test Mobile Builds
+    needs: [build-android, build-ios]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tcp-forwarder-android-*
+          path: android-test
+
+      - name: Test Android binaries
+        run: |
+          echo "=== Android 构建测试 ==="
+          for dir in android-test/tcp-forwarder-android-*; do
+            if [ -d "$dir" ]; then
+              target=$(basename "$dir" | sed 's/tcp-forwarder-android-//')
+              echo "测试 Android $target 构建:"
+              if [ -f "$dir/tcp-forwarder" ]; then
+                echo "✅ 二进制文件存在"
+                echo "文件大小: $(du -h "$dir/tcp-forwarder" | cut -f1)"
+                echo "文件类型: $(file "$dir/tcp-forwarder")"
+              else
+                echo "❌ 二进制文件不存在"
+              fi
+              echo "---"
+            fi
+          done
+
+      - name: Download iOS artifacts  
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tcp-forwarder-ios-*
+          path: ios-test
+
+      - name: Test iOS binaries
+        run: |
+          echo "=== iOS 构建测试 ==="
+          for dir in ios-test/tcp-forwarder-ios-*; do
+            if [ -d "$dir" ]; then
+              target=$(basename "$dir" | sed 's/tcp-forwarder-ios-//')
+              echo "测试 iOS $target 构建:"
+              if [ -f "$dir/tcp-forwarder" ]; then
+                echo "✅ 二进制文件存在"
+                echo "文件大小: $(du -h "$dir/tcp-forwarder" | cut -f1)"
+                echo "文件类型: $(file "$dir/tcp-forwarder")"
+              else
+                echo "❌ 二进制文件不存在"
+              fi
+              echo "---"
+            fi
+          done

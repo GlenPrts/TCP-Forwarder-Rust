@@ -1,0 +1,356 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # 代码质量检查
+  quality-check:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tcp-forwarder/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cd tcp-forwarder && cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cd tcp-forwarder && cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cd tcp-forwarder && cargo test --verbose
+
+  # 多平台构建二进制文件
+  build-binaries:
+    name: Build Binary (${{ matrix.target }})
+    needs: quality-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: tcp-forwarder-linux-amd64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: tcp-forwarder-linux-amd64-musl
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: tcp-forwarder-linux-arm64
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+            name: tcp-forwarder-linux-armv7
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            name: tcp-forwarder-windows-amd64.exe
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: tcp-forwarder-macos-amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: tcp-forwarder-macos-arm64
+          # Android 平台
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            name: tcp-forwarder-android-arm64
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+            name: tcp-forwarder-android-armv7
+          - target: i686-linux-android
+            os: ubuntu-latest
+            name: tcp-forwarder-android-x86
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+            name: tcp-forwarder-android-x86_64
+          # iOS 平台
+          - target: aarch64-apple-ios
+            os: macos-latest
+            name: tcp-forwarder-ios-arm64
+          - target: x86_64-apple-ios
+            os: macos-latest
+            name: tcp-forwarder-ios-x86_64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          elif [[ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]]; then
+            sudo apt-get install -y gcc-arm-linux-gnueabihf
+          elif [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+            sudo apt-get install -y musl-tools
+          elif [[ "${{ matrix.target }}" == "x86_64-pc-windows-gnu" ]]; then
+            sudo apt-get install -y gcc-mingw-w64-x86-64
+          elif [[ "${{ matrix.target }}" =~ android ]]; then
+            # 安装 Android NDK
+            wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+            unzip -q android-ndk-r25c-linux.zip
+            export ANDROID_NDK_HOME=$PWD/android-ndk-r25c
+            echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+            echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          fi
+
+      - name: Install iOS tools (macOS)
+        if: matrix.os == 'macos-latest' && contains(matrix.target, 'ios')
+        run: |
+          # iOS 工具已经预装在 macOS runner 中
+          xcode-select --install 2>/dev/null || true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tcp-forwarder/target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Configure cross-compilation
+        run: |
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+              ;;
+            armv7-unknown-linux-gnueabihf)
+              echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+              ;;
+            x86_64-pc-windows-gnu)
+              echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc" >> $GITHUB_ENV
+              ;;
+            aarch64-linux-android)
+              echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_aarch64_linux_android=aarch64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CXX_aarch64_linux_android=aarch64-linux-android21-clang++" >> $GITHUB_ENV
+              ;;
+            armv7-linux-androideabi)
+              echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+              echo "CC_armv7_linux_androideabi=armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+              echo "CXX_armv7_linux_androideabi=armv7a-linux-androideabi21-clang++" >> $GITHUB_ENV
+              ;;
+            i686-linux-android)
+              echo "CARGO_TARGET_I686_LINUX_ANDROID_LINKER=i686-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_i686_linux_android=i686-linux-android21-clang" >> $GITHUB_ENV
+              echo "CXX_i686_linux_android=i686-linux-android21-clang++" >> $GITHUB_ENV
+              ;;
+            x86_64-linux-android)
+              echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=x86_64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_x86_64_linux_android=x86_64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CXX_x86_64_linux_android=x86_64-linux-android21-clang++" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: Build binary
+        run: |
+          cd tcp-forwarder
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            cp tcp-forwarder/target/${{ matrix.target }}/release/tcp-forwarder.exe dist/${{ matrix.name }}
+          else
+            cp tcp-forwarder/target/${{ matrix.target }}/release/tcp-forwarder dist/${{ matrix.name }}
+          fi
+          chmod +x dist/${{ matrix.name }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}
+          retention-days: 7
+
+  # 构建Docker镜像（多平台）
+  build-docker:
+    name: Build Docker Images
+    needs: quality-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 发布版本
+  release:
+    name: Create Release
+    needs: [build-binaries, build-docker]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Prepare release assets
+        run: |
+          cd dist
+          for dir in */; do
+            if [ -d "$dir" ]; then
+              cd "$dir"
+              binary=$(ls)
+              tar -czf "../${binary}.tar.gz" "$binary"
+              cd ..
+            fi
+          done
+          ls -la *.tar.gz
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            changelog=$(awk '/^## \[/{if(p) exit; p=1} p' CHANGELOG.md | head -n -1)
+          else
+            changelog="Automated release for ${{ github.ref_name }}"
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$changelog" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            # TCP智能转发器 ${{ github.ref_name }}
+            
+            ## 📦 下载
+            
+            ### 二进制文件
+            - **Linux (x86_64)**: `tcp-forwarder-linux-amd64.tar.gz`
+            - **Linux (ARM64)**: `tcp-forwarder-linux-arm64.tar.gz`
+            - **Linux (ARMv7)**: `tcp-forwarder-linux-armv7.tar.gz`
+            - **Linux (Musl)**: `tcp-forwarder-linux-amd64-musl.tar.gz`
+            - **Windows (x86_64)**: `tcp-forwarder-windows-amd64.exe.tar.gz`
+            - **macOS (Intel)**: `tcp-forwarder-macos-amd64.tar.gz`
+            - **macOS (Apple Silicon)**: `tcp-forwarder-macos-arm64.tar.gz`
+            
+            ### Docker镜像
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            docker pull ghcr.io/${{ github.repository }}:latest
+            ```
+            
+            ## 📋 更新日志
+            
+            ${{ steps.changelog.outputs.changelog }}
+            
+            ## 🚀 快速开始
+            
+            1. 下载对应平台的二进制文件
+            2. 解压：`tar -xzf tcp-forwarder-*.tar.gz`
+            3. 配置：复制并修改 `config.yaml`
+            4. 运行：`./tcp-forwarder --config config.yaml`
+            
+            或使用Docker：
+            ```bash
+            docker run -d --name tcp-forwarder \
+              -p 1234:1234 -p 9099:9099 \
+              -v $(pwd)/config.yaml:/app/config/config.yaml:ro \
+              ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+          files: dist/*.tar.gz
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+
+  # 安全扫描
+  security-scan:
+    name: Security Scan
+    needs: build-docker
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      security-events: write
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'

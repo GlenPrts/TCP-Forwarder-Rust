@@ -1,0 +1,141 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # 每天UTC 02:00运行测试
+    - cron: '0 2 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, Rust ${{ matrix.rust }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable, beta, nightly]
+        exclude:
+          # 在Windows和macOS上只测试stable版本以节省CI时间
+          - os: windows-latest
+            rust: beta
+          - os: windows-latest
+            rust: nightly
+          - os: macos-latest
+            rust: beta
+          - os: macos-latest
+            rust: nightly
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tcp-forwarder/target
+          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.rust }}-cargo-
+
+      - name: Check formatting (stable only)
+        if: matrix.rust == 'stable'
+        run: cd tcp-forwarder && cargo fmt --all -- --check
+
+      - name: Run clippy (stable only)
+        if: matrix.rust == 'stable'
+        run: cd tcp-forwarder && cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cd tcp-forwarder && cargo build --verbose
+
+      - name: Run tests
+        run: cd tcp-forwarder && cargo test --verbose
+
+      - name: Run integration tests
+        run: cd tcp-forwarder && cargo test --test integration --verbose
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tcp-forwarder/target
+          key: ${{ runner.os }}-coverage-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Generate coverage report
+        run: |
+          cd tcp-forwarder
+          cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: tcp-forwarder/cobertura.xml
+          fail_ci_if_error: false
+
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tcp-forwarder/target
+          key: ${{ runner.os }}-bench-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run benchmarks
+        run: cd tcp-forwarder && cargo bench
+
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        if: github.ref == 'refs/heads/main'
+        with:
+          tool: 'cargo'
+          output-file-path: tcp-forwarder/target/criterion/report/index.html
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: true
+          alert-threshold: '200%'
+          fail-on-alert: true

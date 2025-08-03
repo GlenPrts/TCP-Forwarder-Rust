@@ -21,22 +21,63 @@
 - **优雅关闭**: 支持 Ctrl+C 信号处理和优雅关闭
 - **灵活配置**: 完整的 YAML 配置支持，涵盖所有功能参数
 
+## 支持的平台
+
+### 桌面平台
+- **Linux**: x86_64, ARM64, ARMv7
+- **Windows**: x86_64
+- **macOS**: x86_64 (Intel), ARM64 (Apple Silicon)
+
+### 📱 移动平台
+- **Android**: ARM64, ARMv7, x86, x86_64
+- **iOS**: ARM64 (设备), x86_64 (Intel Mac 模拟器), ARM64 (Apple Silicon Mac 模拟器)
+
+> 详细的移动平台部署指南请参阅 [MOBILE.md](./MOBILE.md)
+
 ## 快速开始
 
 ### 安装要求
 
 - Rust 1.70+ 
 - Tokio 异步运行时
+- 📱 移动平台: Android NDK (Android) 或 Xcode (iOS)
 
 ### 编译
 
+#### 桌面平台
 ```bash
 cd tcp-forwarder
 cargo build --release
 ```
 
+#### 📱 移动平台编译
+
+**Android**
+```bash
+# 安装 Android 目标
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+# 配置 Android NDK 环境变量
+export ANDROID_NDK_HOME=/path/to/android-ndk
+
+# 编译 Android 版本
+cargo build --release --target aarch64-linux-android --features mobile
+cargo build --release --target armv7-linux-androideabi --features mobile
+```
+
+**iOS** (仅限 macOS)
+```bash
+# 安装 iOS 目标
+rustup target add aarch64-apple-ios x86_64-apple-ios
+
+# 编译 iOS 版本
+cargo build --release --target aarch64-apple-ios --features mobile
+cargo build --release --target x86_64-apple-ios --features mobile
+```
+
 ### 运行
 
+#### 桌面平台
 ```bash
 # 使用默认配置文件 (config.yaml)
 ./target/release/tcp-forwarder
@@ -48,6 +89,31 @@ cargo build --release
 # 查看帮助信息
 ./target/release/tcp-forwarder --help
 ```
+
+#### 📱 移动平台运行
+
+**Android**
+```bash
+# 通过 ADB 部署到设备
+adb push target/aarch64-linux-android/release/tcp-forwarder /data/local/tmp/
+adb push config.yaml /sdcard/tcp-forwarder/
+adb shell chmod +x /data/local/tmp/tcp-forwarder
+
+# 运行
+adb shell '/data/local/tmp/tcp-forwarder --config /sdcard/tcp-forwarder/config.yaml'
+```
+
+**iOS**
+```bash
+# 越狱设备通过 SSH 部署
+scp target/aarch64-apple-ios/release/tcp-forwarder root@device:/usr/local/bin/
+scp config.yaml root@device:/var/mobile/
+
+# 运行
+ssh root@device '/usr/local/bin/tcp-forwarder --config /var/mobile/config.yaml'
+```
+
+> 📖 详细的移动平台部署说明请参阅 [MOBILE.md](./MOBILE.md)
 
 ## 配置说明
 

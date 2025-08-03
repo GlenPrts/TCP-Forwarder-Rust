@@ -18,7 +18,7 @@ logging:
   # 日志级别，决定了哪些日志会被记录。
   # 可选值: "trace", "debug", "info", "warn", "error" (从最详细到最不详细)。
   # "info" 是生产环境的常用选择。
-  level: "debug"
+  level: "info"
   
   # 日志输出格式。
   # "text": 人类可读的文本格式，适合开发和调试。
@@ -60,7 +60,7 @@ remotes:
     # 当 type = "file" 时，使用此配置块。
     file:
       # IP列表文件的路径。文件内容应为每行一个IP地址。
-      path: "./ip_list.txt"
+      path: "./test_ip_list.txt"
       # 是否监视文件变动。如果为 true，当文件内容发生变化时，应用会自动重载IP列表。(暂未实现)
       watch: false
 

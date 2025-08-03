@@ -1,0 +1,106 @@
+# cargo-deny 配置文件
+# 用于检查依赖项、许可证和安全问题
+
+# 许可证检查配置
+[licenses]
+# 允许的许可证列表
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+]
+
+# 不允许的许可证
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-1.0",
+    "AGPL-3.0",
+]
+
+# 例外情况（如果需要使用某些特定的包）
+exceptions = []
+
+# 许可证信息不明确时的处理
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 }
+]
+
+# 禁止特定的包
+[bans]
+# 完全禁止的包
+deny = []
+
+# 跳过检查的包
+skip = []
+
+# 跳过树检查
+skip-tree = []
+
+# 多版本警告配置
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+# 允许的重复依赖
+allow = []
+
+# 外部默认功能
+external-default-features = "allow"
+
+# 源码检查配置
+[sources]
+# 未知注册中心处理
+unknown-registry = "warn"
+# 未知git处理
+unknown-git = "warn"
+
+# 允许的注册中心
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# 允许的git源
+allow-git = []
+
+# 安全漏洞检查配置
+[advisories]
+# 数据库地址
+db-path = "~/.cargo/advisory-db"
+# 数据库更新网址
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# 漏洞处理方式
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+
+# 忽略的安全建议（谨慎使用）
+ignore = [
+    # 示例：忽略特定的安全建议
+    # "RUSTSEC-2020-0001",
+]
+
+# 配置检查
+[graph]
+# 目标配置
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "x86_64-apple-darwin" },
+]
+
+# 功能配置
+all-features = false
+no-default-features = false
+features = []
+
+# 排除的依赖
+exclude = []

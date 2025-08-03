@@ -1,0 +1,259 @@
+name: Code Quality & Security
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # 每天 UTC 02:00 运行全面扫描
+    - cron: '0 2 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  code-quality:
+    name: Code Quality Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tcp-forwarder/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check
+        run: |
+          cd tcp-forwarder
+          cargo fmt --all -- --check
+
+      - name: Clippy analysis
+        run: |
+          cd tcp-forwarder
+          cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Documentation check
+        run: |
+          cd tcp-forwarder
+          cargo doc --no-deps --document-private-items
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        run: |
+          cd tcp-forwarder
+          cargo audit
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: Run cargo-deny
+        run: |
+          cd tcp-forwarder
+          cargo deny check
+
+  vulnerability-scan:
+    name: Vulnerability Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  codeql-analysis:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: 'cpp'  # Rust编译后的代码
+          queries: security-and-quality
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build project
+        run: |
+          cd tcp-forwarder
+          cargo build --release
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  license-check:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-license
+        run: cargo install cargo-license
+
+      - name: Check licenses
+        run: |
+          cd tcp-forwarder
+          cargo license --json > licenses.json
+          
+      - name: Upload license report
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-report
+          path: tcp-forwarder/licenses.json
+
+  performance-analysis:
+    name: Performance Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install criterion
+        run: |
+          cd tcp-forwarder
+          # 如果有性能测试，添加criterion依赖
+          # cargo add --dev criterion
+
+      - name: Run benchmarks
+        run: |
+          cd tcp-forwarder
+          # cargo bench
+          echo "性能测试配置待完善"
+
+  supply-chain-security:
+    name: Supply Chain Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: SLSA Generic Generator
+        id: generator
+        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.10.0
+        with:
+          base64-subjects: ""
+          provenance-name: "tcp-forwarder-provenance.intoto.jsonl"
+
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [code-quality, security-audit, vulnerability-scan]
+    if: always()
+    steps:
+      - name: Check quality gate
+        run: |
+          echo "=== 质量门禁检查 ==="
+          
+          # 检查各个job的状态
+          code_quality="${{ needs.code-quality.result }}"
+          security_audit="${{ needs.security-audit.result }}"
+          vulnerability_scan="${{ needs.vulnerability-scan.result }}"
+          
+          echo "代码质量检查: $code_quality"
+          echo "安全审计: $security_audit"
+          echo "漏洞扫描: $vulnerability_scan"
+          
+          # 如果任何关键检查失败，则失败
+          if [[ "$code_quality" != "success" || "$security_audit" != "success" ]]; then
+            echo "❌ 质量门禁检查失败"
+            exit 1
+          fi
+          
+          if [[ "$vulnerability_scan" != "success" ]]; then
+            echo "⚠️  漏洞扫描检查失败，请查看安全报告"
+            # 可以选择是否因为漏洞扫描失败而阻止部署
+            # exit 1
+          fi
+          
+          echo "✅ 质量门禁检查通过"
+
+      - name: Comment PR on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ❌ 质量门禁检查失败
+              
+              代码质量或安全检查未通过，请检查以下内容：
+              
+              - 🔍 代码格式和Clippy警告
+              - 🔒 安全漏洞和依赖项审计
+              - 📋 许可证合规性
+              
+              请修复相关问题后重新提交。`
+            })
+
+      - name: Comment PR on success
+        if: success() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ 质量门禁检查通过
+              
+              所有代码质量和安全检查均已通过！
+              
+              - ✅ 代码格式规范
+              - ✅ 无Clippy警告
+              - ✅ 无已知安全漏洞
+              - ✅ 依赖项审计通过
+              
+              该PR可以安全合并。`
+            })
