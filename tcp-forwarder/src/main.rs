@@ -12,7 +12,7 @@ use std::path::Path;
 use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
 use std::time::Duration;
-// 删除未使用的导入
+use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use rand::prelude::*;
@@ -29,8 +29,11 @@ use crate::loadbalancer::{LoadBalancer, LoadBalanceAlgorithm};
 /// 主函数
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 解析命令行参数获取配置文件路径
+    let config_path = get_config_path();
+    
     // 加载配置文件
-    let config = load_config("config.yaml")?;
+    let config = load_config(&config_path)?;
     
     // 初始化日志系统
     init_logging(&config.logging)?;
@@ -243,17 +246,75 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// 获取配置文件路径
+/// 支持通过命令行参数 --config 或 -c 指定配置文件路径
+/// 默认使用当前目录下的 config.yaml
+fn get_config_path() -> String {
+    let args: Vec<String> = env::args().collect();
+    
+    // 查找 --config 或 -c 参数
+    for i in 0..args.len() {
+        if (args[i] == "--config" || args[i] == "-c") && i + 1 < args.len() {
+            return args[i + 1].clone();
+        }
+        // 支持 --config=path 格式
+        if args[i].starts_with("--config=") {
+            return args[i].strip_prefix("--config=").unwrap().to_string();
+        }
+    }
+    
+    // 检查是否有 --help 或 -h 参数
+    for arg in &args {
+        if arg == "--help" || arg == "-h" {
+            print_usage();
+            std::process::exit(0);
+        }
+    }
+    
+    // 默认配置文件路径
+    "config.yaml".to_string()
+}
+
+/// 打印使用说明
+fn print_usage() {
+    println!("TCP Forwarder v{}", env!("CARGO_PKG_VERSION"));
+    println!("一个基于 Rust 的高性能 TCP 流量转发器");
+    println!();
+    println!("用法:");
+    println!("  {} [选项]", env::args().next().unwrap_or_else(|| "tcp-forwarder".to_string()));
+    println!();
+    println!("选项:");
+    println!("  -c, --config <FILE>    指定配置文件路径 [默认: config.yaml]");
+    println!("  -h, --help            显示此帮助信息");
+    println!();
+    println!("示例:");
+    println!("  {} --config /etc/tcp-forwarder/config.yaml", env::args().next().unwrap_or_else(|| "tcp-forwarder".to_string()));
+    println!("  {} -c ./my-config.yaml", env::args().next().unwrap_or_else(|| "tcp-forwarder".to_string()));
+}
+
 /// 加载配置文件
 fn load_config(config_path: impl AsRef<Path>) -> Result<Config> {
+    let config_path = config_path.as_ref();
+    
+    // 检查配置文件是否存在
+    if !config_path.exists() {
+        return Err(anyhow::anyhow!(
+            "配置文件不存在: {}\n请确保配置文件存在，或使用 --config 参数指定正确的配置文件路径",
+            config_path.display()
+        ));
+    }
+    
     // 从配置文件中读取配置
     let settings = ::config::Config::builder()
-        .add_source(::config::File::from(config_path.as_ref()))
+        .add_source(::config::File::from(config_path))
         .build()
-        .context("无法解析配置文件")?;
+        .context(format!("无法解析配置文件: {}", config_path.display()))?;
     
     // 将配置反序列化为Config结构体
     let config: Config = settings.try_deserialize()
-        .context("无法将配置反序列化为Config结构体")?;
+        .context(format!("配置文件格式错误: {}", config_path.display()))?;
+    
+    info!("已加载配置文件: {}", config_path.display());
     
     Ok(config)
 }
