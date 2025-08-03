@@ -145,11 +145,6 @@ impl MetricsManager {
         counter!("tcp_forwarder_pool_connections_reused", 1);
     }
 
-    /// 记录连接池连接关闭
-    pub fn record_pool_connection_closed(&self) {
-        counter!("tcp_forwarder_pool_connections_closed", 1);
-    }
-
     /// 记录连接池健康检查
     pub fn record_pool_health_check(&self, is_healthy: bool) {
         if is_healthy {
@@ -231,7 +226,6 @@ fn register_metrics() {
     describe_counter!("tcp_forwarder_pool_connections_created", "连接池创建连接数");
     describe_counter!("tcp_forwarder_pool_connections_failed", "连接池创建连接失败数");
     describe_counter!("tcp_forwarder_pool_connections_reused", "连接池重用连接数");
-    describe_counter!("tcp_forwarder_pool_connections_closed", "连接池关闭连接数");
     describe_counter!("tcp_forwarder_pool_health_checks_passed", "连接池健康检查通过数");
     describe_counter!("tcp_forwarder_pool_health_checks_failed", "连接池健康检查失败数");
     

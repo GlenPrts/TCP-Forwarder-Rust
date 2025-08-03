@@ -18,7 +18,7 @@ logging:
   # 日志级别，决定了哪些日志会被记录。
   # 可选值: "trace", "debug", "info", "warn", "error" (从最详细到最不详细)。
   # "info" 是生产环境的常用选择。
-  level: "trace"
+  level: "debug"
   
   # 日志输出格式。
   # "text": 人类可读的文本格式，适合开发和调试。
@@ -153,7 +153,7 @@ pools:
   # 连接池通用配置
   common:
     # 创建一个新TCP连接（Dial）的超时时间。
-    dial_timeout: "2s"
+    dial_timeout: "1s"
     # 连接在池中保持空闲的最大时间。超时后将被关闭并重新创建以保持活性。
     idle_timeout: "10m"
     # 当一个IP被从活跃集中移除时，等待池中现有连接处理完业务的最大时间（排空超时）。

@@ -28,4 +28,8 @@ metrics-exporter-prometheus = "0.12"
 # Web服务器
 axum = "0.7"
 tower = "0.4"
+# TCP socket配置
+socket2 = "0.5"
+# 异步utilities
+futures = "0.3"
 tower-http = { version = "0.5", features = ["cors"] }

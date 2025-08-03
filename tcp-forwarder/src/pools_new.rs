@@ -1,13 +1,14 @@
 use anyhow::Result;
 use dashmap::DashMap;
 use futures::future::try_join_all;
-use socket2::{TcpKeepalive};
+use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, sleep, Duration};
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::config::RemotesConfig;
@@ -51,7 +52,7 @@ impl PooledConnection {
 pub type PoolManager = Arc<DashMap<IpAddr, PoolState>>;
 
 /// 单个IP的连接池状态
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PoolState {
     /// 连接池的发送端，filler任务用它向池中添加连接
     pub sender: Sender<PooledConnection>,
@@ -95,8 +96,8 @@ pub async fn create_pool_for_ip(
     let pool_state = PoolState::new(buffer_size);
     pools.insert(ip, pool_state);
 
-    if let Some(pool_state_ref) = pools.get(&ip) {
-        let pool_state = pool_state_ref.value().clone();
+    if let Some(pool_state) = pools.get(&ip) {
+        let pool_state = pool_state.clone();
 
         // 启动连接填充任务
         let filler_pool_state = pool_state.clone();
@@ -231,15 +232,19 @@ async fn filler_task(ip: IpAddr, port: u16, pool_state: PoolState, target_size: 
 }
 
 /// 创建带TCP keepalive的连接
-pub async fn create_connection_with_keepalive(ip: IpAddr, port: u16) -> anyhow::Result<TcpStream> {
+async fn create_connection_with_keepalive(ip: IpAddr, port: u16) -> anyhow::Result<TcpStream> {
     let addr = SocketAddr::new(ip, port);
 
-    // 先创建标准连接
-    let stream = TcpStream::connect(addr).await?;
+    // 创建socket
+    let socket = Socket::new(
+        match ip {
+            IpAddr::V4(_) => Domain::IPV4,
+            IpAddr::V6(_) => Domain::IPV6,
+        },
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )?;
 
-    // 获取底层socket并设置keepalive
-    let socket = socket2::Socket::from(stream.into_std()?);
-    
     // 配置TCP keepalive
     let keepalive = TcpKeepalive::new()
         .with_time(Duration::from_secs(60)) // 60秒后开始发送keepalive
@@ -247,11 +252,16 @@ pub async fn create_connection_with_keepalive(ip: IpAddr, port: u16) -> anyhow::
         .with_retries(3); // 重试3次
 
     socket.set_tcp_keepalive(&keepalive)?;
-    
-    // 转换回tokio TcpStream
+
+    // 设置为非阻塞模式
     socket.set_nonblocking(true)?;
-    let std_stream: std::net::TcpStream = socket.into();
-    let stream = TcpStream::from_std(std_stream)?;
+
+    // 转换为tokio的TcpStream
+    let socket: std::net::TcpStream = socket.into();
+    let stream = TcpStream::from_std(socket)?;
+
+    // 连接到目标地址
+    stream.connect(addr).await?;
 
     debug!("成功创建带keepalive的连接到 {}", addr);
     Ok(stream)
@@ -287,31 +297,6 @@ pub async fn get_connection_from_pool(
     None
 }
 
-/// 创建连接池管理器
-pub fn create_pool_manager() -> PoolManager {
-    Arc::new(DashMap::new())
-}
-
-/// 连接池管理任务
-pub async fn pool_manager_task(
-    pool_manager: PoolManager,
-    active_remotes: ActiveRemotes,
-    score_board: ScoreBoard,
-    remotes_config: Arc<crate::config::RemotesConfig>,
-    pools_config: Arc<crate::config::PoolsConfig>,
-) -> Result<()> {
-    info!("启动连接池管理任务");
-
-    // 使用新的initialize_pools函数
-    let _initialized_pools = initialize_pools(&remotes_config, active_remotes, score_board).await?;
-
-    // 保持任务运行
-    loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        debug!("连接池管理任务心跳");
-    }
-}
-
 /// 创建并管理所有远程IP的连接池
 #[instrument(skip(active_remotes, score_board))]
 pub async fn initialize_pools(
@@ -321,18 +306,16 @@ pub async fn initialize_pools(
 ) -> Result<PoolManager> {
     let pool_manager = Arc::new(DashMap::new());
 
-    // 从active_remotes获取当前活跃的IP列表
-    let active_ips = active_remotes.read().await;
-    let ip_count = active_ips.len();
-    info!("开始初始化连接池，远程数量: {}", ip_count);
+    info!("开始初始化连接池，远程数量: {}", remotes_config.ips.len());
 
     // 为每个远程IP创建连接池
-    let pool_creation_tasks: Vec<_> = active_ips
+    let pool_creation_tasks: Vec<_> = remotes_config
+        .ips
         .iter()
         .map(|ip| {
             let pools = pool_manager.clone();
             let ip = *ip;
-            let port = remotes_config.default_remote_port;
+            let port = remotes_config.port;
             let pool_size = 5; // 默认池大小
             let buffer_size = 10; // 默认缓冲区大小
 

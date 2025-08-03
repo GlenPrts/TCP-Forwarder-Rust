@@ -1,0 +1,447 @@
+use anyhow::Result;
+use dashmap::DashMap;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::time::{sleep, Duration};
+use tracing::{debug, error, info, warn, instrument};
+use crate::config::RemotesConfig;
+use crate::scorer::ScoreBoard;
+use crate::selector::ActiveRemotes;
+use crate::metrics;
+use socket2::{Socket, Domain, Type, Protocol, TcpKeepalive};
+
+/// 连接池中的连接包装器
+#[derive(Debug)]
+pub struct PooledConnection {
+    /// TCP连接
+    pub stream: TcpStream,
+    /// 连接创建时间
+    pub created_at: Instant,
+    /// 最后一次活跃时间
+    pub last_active: Instant,
+}
+
+impl PooledConnection {
+    pub fn new(stream: TcpStream) -> Self {
+        let now = Instant::now();
+        Self {
+            stream,
+            created_at: now,
+            last_active: now,
+        }
+    }
+
+    /// 更新最后活跃时间
+    pub fn touch(&mut self) {
+        self.last_active = Instant::now();
+    }
+
+    /// 检查连接是否过期
+    pub fn is_expired(&self, max_idle_time: Duration) -> bool {
+        self.last_active.elapsed() > max_idle_time
+    }
+}
+
+/// 连接池管理器类型定义
+pub type PoolManager = Arc<DashMap<IpAddr, PoolState>>;
+
+/// 单个IP的连接池状态
+#[derive(Debug)]
+pub struct PoolState {
+    /// 连接池的发送端，filler任务用它向池中添加连接
+    pub sender: Sender<PooledConnection>,
+    /// 连接池的接收端，用于获取预建立的连接
+    pub receiver: Arc<tokio::sync::Mutex<Receiver<PooledConnection>>>,
+    /// 池状态标记，用于控制填充任务的停止
+    pub is_active: Arc<tokio::sync::RwLock<bool>>,
+}
+
+impl PoolState {
+    /// 创建新的连接池状态
+    pub fn new(buffer_size: usize) -> Self {
+        let (sender, receiver) = mpsc::channel(buffer_size);
+        Self {
+            sender,
+            receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+            is_active: Arc::new(tokio::sync::RwLock::new(true)),
+        }
+    }
+    
+    /// 标记连接池为非活跃状态
+    pub async fn mark_inactive(&self) {
+        let mut active = self.is_active.write().await;
+        *active = false;
+    }
+    
+    /// 检查连接池是否活跃
+    pub async fn is_active(&self) -> bool {
+        *self.is_active.read().await
+    }
+}
+
+/// 创建连接池管理器
+pub fn create_pool_manager() -> PoolManager {
+    Arc::new(DashMap::new())
+}
+
+/// 连接池管理任务
+/// 
+/// 这个任务监听活跃IP列表的变化，并相应地管理连接池：
+/// - 为新增的IP创建连接池和填充任务
+/// - 为移除的IP停止填充任务并排空连接池
+#[instrument(skip(pool_manager, active_remotes, score_board, remotes_config, pools_config))]
+pub async fn pool_manager_task(
+    pool_manager: PoolManager,
+    active_remotes: ActiveRemotes,
+    score_board: ScoreBoard,
+    remotes_config: RemotesConfig,
+    pools_config: crate::config::PoolsConfig,
+) -> Result<()> {
+    info!("连接池管理任务已启动");
+    
+    let mut last_active_ips: Vec<IpAddr> = Vec::new();
+    let check_interval = Duration::from_secs(1); // 检查间隔1秒
+    
+    loop {
+        // 获取当前活跃IP列表
+        let current_active_ips = {
+            let ips = active_remotes.read().await;
+            ips.clone()
+        };
+        
+        // 如果IP列表发生变化，更新连接池
+        if current_active_ips != last_active_ips {
+            debug!("检测到活跃IP列表变化，更新连接池");
+            
+            // 处理新增的IP
+            for ip in &current_active_ips {
+                if !last_active_ips.contains(ip) {
+                    info!("为新活跃IP {} 创建连接池", ip);
+                    create_pool_for_ip(&pool_manager, *ip, &score_board, &remotes_config, &pools_config).await?;
+                }
+            }
+            
+            // 处理移除的IP
+            for ip in &last_active_ips {
+                if !current_active_ips.contains(ip) {
+                    info!("移除非活跃IP {} 的连接池", ip);
+                    remove_pool_for_ip(&pool_manager, *ip).await;
+                }
+            }
+            
+            last_active_ips = current_active_ips;
+        }
+        
+        sleep(check_interval).await;
+    }
+}
+
+/// 为指定IP创建连接池，包含填充任务和健康检查任务
+pub async fn create_pool_for_ip(
+    ip: IpAddr,
+    port: u16,
+    pools: PoolManager,
+    pool_size: usize,
+    buffer_size: usize,
+) {
+    let pool_state = PoolState::new(buffer_size);
+    pools.insert(ip, pool_state);
+    
+    if let Some(pool_state) = pools.get(&ip) {
+        let pool_state = pool_state.clone();
+        
+        // 启动连接填充任务
+        let filler_pool_state = pool_state.clone();
+        tokio::spawn(async move {
+            filler_task(ip, port, filler_pool_state, pool_size).await;
+        });
+        
+        // 启动健康检查任务
+        let health_check_pool_state = pool_state.clone();
+        tokio::spawn(async move {
+            health_check_task(health_check_pool_state).await;
+        });
+    }
+}
+
+/// 连接池健康检查任务
+async fn health_check_task(pool_state: PoolState) {
+    const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+    const MAX_IDLE_TIME: Duration = Duration::from_secs(120);
+    
+    let mut interval = interval(HEALTH_CHECK_INTERVAL);
+    
+    while pool_state.is_active().await {
+        interval.tick().await;
+        
+        let mut receiver = pool_state.receiver.lock().await;
+        let mut valid_connections = Vec::new();
+        
+        // 取出所有连接进行检查
+        while let Ok(mut connection) = receiver.try_recv() {
+            if !connection.is_expired(MAX_IDLE_TIME) {
+                // 检查连接是否还有效（简单的可读性检查）
+                if is_connection_healthy(&mut connection.stream).await {
+                    connection.touch();
+                    valid_connections.push(connection);
+                    METRICS.record_pool_health_check(true);
+                } else {
+                    info!("从连接池中移除无效连接");
+                    METRICS.record_pool_health_check(false);
+                    METRICS.record_pool_connection_closed();
+                }
+            } else {
+                info!("从连接池中移除过期连接");
+                METRICS.record_pool_health_check(false);
+                METRICS.record_pool_connection_closed();
+            }
+        }
+        
+        // 将有效连接放回池中
+        for connection in valid_connections {
+            if pool_state.sender.try_send(connection).is_err() {
+                // 如果放不回去说明池已满，这是正常情况
+                break;
+            }
+        }
+        
+        drop(receiver);
+    }
+}
+
+/// 检查TCP连接是否健康
+async fn is_connection_healthy(stream: &mut TcpStream) -> bool {
+    // 使用非阻塞方式检查连接状态
+    stream.ready(tokio::io::Interest::READABLE | tokio::io::Interest::WRITABLE).await.is_ok()
+}
+
+/// 移除指定IP的连接池
+async fn remove_pool_for_ip(pool_manager: &PoolManager, ip: IpAddr) {
+    if let Some((_, pool_state)) = pool_manager.remove(&ip) {
+        // 标记连接池为非活跃状态，这将导致填充任务退出
+        pool_state.mark_inactive().await;
+        
+        // 排空连接池中的现有连接
+        let mut receiver = pool_state.receiver.lock().await;
+        let mut drained_count = 0;
+        
+        while let Ok(_stream) = receiver.try_recv() {
+            // 连接会在离开作用域时自动关闭
+            drained_count += 1;
+        }
+        
+        if drained_count > 0 {
+            debug!("已排空IP {} 连接池中的 {} 个连接", ip, drained_count);
+        }
+    }
+}
+
+/// 连接池填充任务
+/// 
+/// 持续维护指定IP的连接池，确保池中始终有足够的可用连接
+#[instrument(skip(pool_state, score_board, config))]
+async fn filler_task(
+    ip: IpAddr,
+    port: u16,
+    pool_state: PoolState,
+    score_board: ScoreBoard,
+    config: crate::config::PoolsConfig,
+) -> Result<()> {
+    let target_addr = format!("{}:{}", ip, port);
+    let connection_timeout = config.common.dial_timeout;
+    
+    // 根据策略类型确定池大小和填充间隔
+    let (pool_size, fill_interval) = match config.strategy.strategy_type.as_str() {
+        "static" => {
+            let static_config = config.strategy.static_.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("静态策略配置缺失"))?;
+            (static_config.size_per_remote, Duration::from_millis(100))
+        }
+        "dynamic" => {
+            let dynamic_config = config.strategy.dynamic.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("动态策略配置缺失"))?;
+            // 暂时使用最小大小，实际动态调整逻辑可以后续扩展
+            (dynamic_config.min_size, dynamic_config.scaling.interval)
+        }
+        _ => {
+            return Err(anyhow::anyhow!("不支持的连接池策略类型: {}", config.strategy.strategy_type));
+        }
+    };
+    
+    debug!("开始为 {} 填充连接池，目标大小: {}", target_addr, pool_size);
+    
+    loop {
+        // 检查连接池是否仍然活跃
+        if !pool_state.is_active().await {
+            info!("IP {} 的连接池已标记为非活跃，停止填充任务", ip);
+            break;
+        }
+        
+        // 检查连接池发送端是否已关闭
+        if pool_state.sender.is_closed() {
+            debug!("连接池发送端已关闭: {}", target_addr);
+            break;
+        }
+        
+        
+        // 尝试创建新连接
+        let start_time = std::time::Instant::now();
+        
+        let ip_str = ip.to_string(); // 提前声明ip_str变量
+
+        match tokio::time::timeout(connection_timeout, TcpStream::connect(&target_addr)).await {
+            Ok(Ok(stream)) => {
+                // 连接成功
+                let connect_time = start_time.elapsed();
+                debug!("成功创建到 {} 的连接，耗时: {:?}", target_addr, connect_time);
+                
+                // 验证新创建的连接是否有效
+                if !is_connection_alive(&stream).await {
+                    debug!("新创建的连接到 {} 立即失效，丢弃", target_addr);
+                    // 记录失败
+                    if let Some(mut score_data) = score_board.get_mut(&ip) {
+                        score_data.record_failure();
+                    }
+                    metrics::record_pool_connection_failed(&ip_str);
+                    sleep(fill_interval * 2).await;
+                    continue;
+                }
+                
+                // 更新评分数据
+                if let Some(mut score_data) = score_board.get_mut(&ip) {
+                    score_data.record_success(connect_time);
+                }
+                
+                // 记录指标
+                metrics::record_pool_connection_created(&ip_str);
+                
+                // 尝试将连接添加到池中
+                if let Err(_) = pool_state.sender.try_send(stream) {
+                    // 发送失败，可能是因为池已满或接收端已关闭
+                    // 这种情况下连接会自动关闭
+                    debug!("无法将连接添加到池中，可能池已满: {}", target_addr);
+                } else {
+                    // 成功添加到池中，更新池大小指标
+                    // 注意：这里我们不能准确知道当前池的大小，只是记录成功添加了连接
+                    debug!("成功将连接添加到池中: {}", target_addr);
+                }
+            }
+            Ok(Err(e)) => {
+                // 连接失败
+                warn!("连接到 {} 失败: {}", target_addr, e);
+                
+                // 更新评分数据
+                if let Some(mut score_data) = score_board.get_mut(&ip) {
+                    score_data.record_failure();
+                }
+                
+                // 记录指标
+                let ip_str = ip.to_string();
+                metrics::record_pool_connection_failed(&ip_str);
+                
+                // 连接失败时等待更长时间再重试
+                sleep(fill_interval * 2).await;
+                continue;
+            }
+            Err(_) => {
+                // 连接超时
+                warn!("连接到 {} 超时", target_addr);
+                
+                // 更新评分数据
+                if let Some(mut score_data) = score_board.get_mut(&ip) {
+                    score_data.record_failure();
+                }
+                
+                // 记录指标
+                let ip_str = ip.to_string();
+                metrics::record_pool_connection_failed(&ip_str);
+                
+                // 超时时等待更长时间再重试
+                sleep(fill_interval * 2).await;
+                continue;
+            }
+        }
+        
+        // 成功创建连接后，短暂等待再创建下一个
+        sleep(fill_interval).await;
+    }
+    
+    Ok(())
+}
+
+/// 从连接池获取一个连接
+/// 
+/// 如果池中有可用连接，立即返回；否则返回None
+/// 会验证连接的有效性，如果连接已关闭会自动丢弃
+pub async fn get_connection_from_pool(
+    pool_manager: &PoolManager,
+    ip: IpAddr,
+) -> Option<TcpStream> {
+    if let Some(pool_state) = pool_manager.get(&ip) {
+        // 检查连接池是否仍然活跃
+        if !pool_state.is_active().await {
+            debug!("IP {} 的连接池已不活跃，无法获取连接", ip);
+            return None;
+        }
+        
+        // 尝试获取接收端锁，但设置超时避免死锁
+        let receiver_lock = match tokio::time::timeout(
+            Duration::from_millis(100), 
+            pool_state.receiver.lock()
+        ).await {
+            Ok(lock) => lock,
+            Err(_) => {
+                debug!("获取IP {} 连接池接收端锁超时", ip);
+                return None;
+            }
+        };
+        
+        let mut receiver = receiver_lock;
+        
+        // 尝试获取多个连接，直到找到一个有效的连接
+        for attempt in 0..3 { // 最多尝试3次
+            match receiver.try_recv() {
+                Ok(stream) => {
+                    // 验证连接是否仍然有效
+                    if is_connection_alive(&stream).await {
+                        debug!("从连接池获取到 {} 的有效连接 (尝试 {})", ip, attempt + 1);
+                        return Some(stream);
+                    } else {
+                        debug!("从连接池获取到 {} 的连接已失效，丢弃并重试 (尝试 {})", ip, attempt + 1);
+                        // 连接已关闭，继续尝试下一个
+                        continue;
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    debug!("连接池中没有可用的 {} 连接", ip);
+                    return None;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    debug!("IP {} 连接池接收端已断开", ip);
+                    return None;
+                }
+            }
+        }
+        
+        debug!("连接池中没有找到有效的 {} 连接", ip);
+        None
+    } else {
+        debug!("IP {} 没有对应的连接池", ip);
+        None
+    }
+}
+
+/// 检查TCP连接是否仍然有效
+/// 
+/// 通过尝试读取0字节来检测连接状态，这不会阻塞也不会消耗数据
+async fn is_connection_alive(stream: &TcpStream) -> bool {
+    // 设置非阻塞模式临时检查
+    match stream.try_read(&mut [0u8; 0]) {
+        Ok(_) => true, // 连接正常
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => true, // 连接正常，只是没有数据
+        Err(_) => false, // 连接已关闭或有错误
+    }
+}

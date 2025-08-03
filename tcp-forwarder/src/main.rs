@@ -22,6 +22,8 @@ use tracing::{info, warn, error, debug, Level, instrument};
 use tracing_subscriber::EnvFilter;
 use selector::ActiveRemotes;
 
+use crate::metrics::METRICS;
+
 /// 主函数
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,11 +34,10 @@ async fn main() -> Result<()> {
     init_logging(&config.logging)?;
     
     // 初始化指标系统
-    let metrics_manager = if config.metrics.enabled {
-        Some(metrics::MetricsManager::new()?)
-    } else {
-        None
-    };
+    if config.metrics.enabled {
+        METRICS.initialize().await?;
+        info!("指标系统已启动，监听地址: {}", config.metrics.listen_addr);
+    }
     
     // 记录启动时间
     let start_time = std::time::Instant::now();
@@ -86,17 +87,17 @@ async fn main() -> Result<()> {
     let pool_pools_config = config.pools.clone();
     let pool_manager_clone = pool_manager.clone();
     tokio::spawn(async move {
-        if let Err(e) = pools::pool_manager_task(pool_manager_clone, pool_active_remotes, pool_score_board, pool_remotes_config, pool_pools_config).await {
+        if let Err(e) = pools::pool_manager_task(pool_manager_clone, pool_active_remotes, pool_score_board, Arc::new(pool_remotes_config), Arc::new(pool_pools_config)).await {
             error!("连接池管理任务错误: {}", e);
         }
     });
     
     // 启动指标服务器（如果启用）
-    if let Some(metrics_manager) = metrics_manager {
+    if config.metrics.enabled {
         let metrics_listen_addr = config.metrics.listen_addr;
         let metrics_path = config.metrics.path.clone();
         tokio::spawn(async move {
-            if let Err(e) = metrics_manager.start_server(metrics_listen_addr, metrics_path).await {
+            if let Err(e) = METRICS.start_server(metrics_listen_addr, metrics_path).await {
                 error!("指标服务器错误: {}", e);
             }
         });
@@ -109,7 +110,7 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             let uptime = start_time_clone.elapsed().as_secs_f64();
-            metrics::record_uptime(uptime);
+            METRICS.record_uptime(uptime);
         }
     });
     
@@ -136,12 +137,12 @@ async fn main() -> Result<()> {
                 let (client_socket, client_addr) = match accept_result {
                     Ok((socket, addr)) => {
                         // 记录新连接
-                        metrics::record_new_connection();
+                        METRICS.record_new_connection();
                         (socket, addr)
                     },
                     Err(e) => {
                         error!("接受连接失败: {}", e);
-                        metrics::record_error();
+                        METRICS.record_error();
                         continue;
                     }
                 };
@@ -158,13 +159,13 @@ async fn main() -> Result<()> {
                     let result = handle_connection(client_socket, client_addr, ar_clone, score_board_clone, pool_manager_clone, remote_port_clone).await;
                     
                     // 记录连接结束
-                    metrics::record_connection_closed();
+                    METRICS.record_connection_closed();
                     
                     if let Err(e) = result {
                         error!(client_addr = %client_addr, "处理连接时出错: {}", e);
-                        metrics::record_connection_failed();
+                        METRICS.record_connection_failed();
                     } else {
-                        metrics::record_connection_success();
+                        METRICS.record_connection_success();
                     }
                 });
             }
@@ -276,28 +277,27 @@ async fn handle_connection(
     
     // 首先尝试从连接池获取预建立的连接
     let mut remote_socket = match pools::get_connection_from_pool(&pool_manager, selected_ip).await {
-        Some(socket) => {
+        Some(mut pooled_connection) => {
             // 从连接池获得连接，记录连接池命中
             debug!("从连接池获得到 {} 的连接", remote_addr);
-            metrics::record_pool_hit(&selected_ip.to_string());
-            socket
+            METRICS.record_pool_hit(&selected_ip.to_string());
+            // 更新连接活跃时间
+            pooled_connection.touch();
+            pooled_connection.stream
         }
         None => {
             // 连接池没有可用连接，进行回退：立即建立新连接
             debug!("连接池无可用连接，立即建立到 {} 的新连接", remote_addr);
-            metrics::record_pool_miss(&selected_ip.to_string());
+            METRICS.record_pool_miss(&selected_ip.to_string());
             
             let start_time = std::time::Instant::now();
             
-            // 设置连接超时
-            let connect_future = TcpStream::connect(&remote_addr);
-            let timeout_duration = Duration::from_secs(10); // 10秒超时
-            
-            match tokio::time::timeout(timeout_duration, connect_future).await {
-                Ok(Ok(socket)) => {
+            // 创建带keepalive的连接
+            match pools::create_connection_with_keepalive(selected_ip, remote_port).await {
+                Ok(socket) => {
                     // 连接成功，更新分数和指标
                     let connect_time = start_time.elapsed();
-                    metrics::record_connection_duration(connect_time);
+                    METRICS.record_connection_duration(connect_time);
                     
                     if let Some(mut score_data) = score_board.get_mut(&selected_ip) {
                         score_data.record_success(connect_time);
@@ -306,19 +306,12 @@ async fn handle_connection(
                     debug!("立即连接到 {} 成功，耗时: {:?}", remote_addr, connect_time);
                     socket
                 },
-                Ok(Err(e)) => {
+                Err(e) => {
                     // 连接失败，更新分数
                     if let Some(mut score_data) = score_board.get_mut(&selected_ip) {
                         score_data.record_failure();
                     }
                     return Err(anyhow::anyhow!("连接到远程服务器 {} 失败: {}", remote_addr, e));
-                },
-                Err(_) => {
-                    // 连接超时
-                    if let Some(mut score_data) = score_board.get_mut(&selected_ip) {
-                        score_data.record_failure();
-                    }
-                    return Err(anyhow::anyhow!("连接到远程服务器 {} 超时", remote_addr));
                 }
             }
         }
@@ -329,7 +322,7 @@ async fn handle_connection(
     match copy_bidirectional(&mut client_socket, &mut remote_socket).await {
         Ok((to_remote, to_client)) => {
             // 记录传输字节数
-            metrics::record_transfer_bytes(to_remote + to_client);
+            METRICS.record_transfer_bytes(to_remote + to_client);
             
             info!(
                 "连接关闭：客户端 -> 远程 {} 字节，远程 -> 客户端 {} 字节", 
