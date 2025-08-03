@@ -1,0 +1,190 @@
+# =============================================================================
+# Rust TCP 智能转发器 - 配置文件
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. 基础服务配置 (Base Service Configuration)
+# -----------------------------------------------------------------------------
+
+# 服务监听配置: 定义如何接收客户端的入口连接。
+server:
+  # 监听的IP地址和端口。
+  # "0.0.0.0" 表示监听本机所有网络接口。
+  # "127.0.0.1" 表示仅监听本地回环地址，只接受来自本机的连接。
+  listen_addr: "127.0.0.1:1234"
+
+# 日志配置: 使用 tracing crate 进行日志记录。
+logging:
+  # 日志级别，决定了哪些日志会被记录。
+  # 可选值: "trace", "debug", "info", "warn", "error" (从最详细到最不详细)。
+  # "info" 是生产环境的常用选择。
+  level: "info"
+  
+  # 日志输出格式。
+  # "text": 人类可读的文本格式，适合开发和调试。
+  # "json": 结构化的JSON格式，方便机器解析和日志系统收集 (如 ELK, Splunk)。
+  format: "text"
+  
+  # 日志输出目标。
+  # "stdout": 标准输出。
+  # "stderr": 标准错误输出。
+  # 或指定一个文件路径，例如: "/var/log/forwarder/app.log"。
+  output: "stdout"
+
+# 指标监控配置: 通过 Prometheus 进行应用性能监控。
+metrics:
+  # 是否启用指标监控端点。
+  enabled: true
+  
+  # Prometheus Scraper 拉取指标的监听地址和端口。
+  # 通常设置为一个内部地址，不对外暴露。
+  listen_addr: "127.0.0.1:9099"
+  
+  # 指标暴露的HTTP路径。
+  path: "/metrics"
+
+# -----------------------------------------------------------------------------
+# 2. 远程端点管理 (Remotes Management)
+# -----------------------------------------------------------------------------
+# 定义后端IP的来源、探测、评分和选择策略。
+remotes:
+  # 默认的远程服务器端口。
+  # 当IP列表中没有指定端口时，将使用此端口进行探测和建立业务连接。
+  default_remote_port: 443
+
+  # IP源提供者: 定义从哪里获取候选IP列表。
+  provider:
+    # 源类型。未来可扩展为 'http', 'dns_srv' 等。
+    type: "file"
+    
+    # 当 type = "file" 时，使用此配置块。
+    file:
+      # IP列表文件的路径。文件内容应为每行一个IP地址。
+      path: "./ip_list.txt"
+      # 是否监视文件变动。如果为 true，当文件内容发生变化时，应用会自动重载IP列表。
+      watch: true
+
+  # 评分数据探测 (Scoring Probing): 主动探测IP以收集评分数据。
+  # 这取代了传统的健康检查，探测的目的是为了更新评分，而非简单判断死活。
+  probing:
+    # 对一组候选IP执行一次探测的周期。
+    interval: "15s"
+    # 单次探测连接的TCP握手超时时间。
+    timeout: "2s"
+    # 每次探测时，选择多少个候选IP进行尝试。
+    # 这可以避免对所有IP造成周期性压力，同时保证评分数据能逐步更新。
+    # 系统会优先探测那些分数最陈旧或从未探测过的IP。
+    probe_candidate_count: 10
+
+  # 评分模型 (Scoring Model): 基于探测和实际建连数据，为每个IP动态打分。
+  scoring:
+    # 权重配置: 定义各个性能维度的重要性，总和建议为1.0。
+    weights:
+      latency: 0.45      # 延迟的重要性
+      jitter: 0.15       # 延迟抖动的重要性
+      success_rate: 0.40 # 连接成功率的重要性
+
+    # 延迟评分 (Latency): 使用EWMA(指数加权移动平均)计算，对近期延迟更敏感。
+    latency:
+      max_score: 45.0             # 此维度满分值 (建议 = 100 * weights.latency)
+      ewma_alpha: 0.2             # EWMA平滑因子 (0.0 ~ 1.0)，值越大对当前样本越敏感。
+      base_latency: "50ms"        # 基准延迟，低于此值可得满分。
+      max_acceptable_latency: "500ms" # 最大可接受延迟，超过此值该维度得0分。
+
+    # 延迟抖动评分 (Jitter): 衡量延迟的稳定性。
+    jitter:
+      max_score: 15.0
+      ewma_alpha: 0.3
+      base_jitter: "10ms"
+      max_acceptable_jitter: "80ms"
+
+    # 连接成功率评分 (Success Rate): 使用EWMA计算。
+    success_rate:
+      max_score: 40.0
+      ewma_alpha: 0.1 # 因子较小，使成功率评分更稳定，不易因单次失败剧烈波动。
+
+    # 失败惩罚与恢复 (Failure Penalty & Recovery)
+    failure_penalty:
+      base_penalty: 5.0      # 连续失败时的基础惩罚分数。
+      exponent_factor: 1.8   # 惩罚的指数增长因子 (下次惩罚 = 上次惩罚 * factor)。
+      max_penalty: 80.0      # 单次连续失败事件的最大惩罚分数。
+      recovery_per_check: 2.5 # IP恢复后，每次成功探测恢复的分数，直到惩罚清零。
+
+    # 历史稳定性奖励 (Historical Bonus)
+    historical_bonus:
+      max_bonus: 10.0 # 对长期稳定运行的IP给予的额外加分，不计入权重。
+      # 每连续成功通过 N 次探测/建连，就增加1分奖励。
+      # 例如: 120 表示约每小时(120 * 30s)增加1分。
+      checks_per_point: 120
+
+  # 选择器策略 (Selector Policy): 周期性地评估并选择最佳IP。
+  selector:
+    # --- 核心配置: 评估与切换周期 ---
+    # 每隔这个时间，系统会根据最新的IP评分，重新计算最优IP集，并决策是否切换。
+    evaluation_interval: "30s"
+
+    # 选出分数最高的 N 个IP作为“活跃集”，交由连接池模块管理。
+    # 设置为大于1可以实现对多个优质IP的负载均衡。
+    active_set_size: 3
+    
+    # IP的健康分数必须高于此阈值，才有资格被选入“活跃集”。
+    min_score_threshold: 20.0
+
+    # 切换策略 (Switching Policy): 防止因分数在临界点附近波动而频繁切换IP（抖动）。
+    switching:
+      # 当一个备选IP的分数，比当前活跃集中分数最低的IP还要高出此百分比时，才触发替换。
+      # 例如设置为 10.0，表示新IP分数要比旧IP高出10%以上才进行切换。
+      switch_up_percent: 10.0
+      
+      # 当一个新IP被选入活跃集后，至少要保留在活跃集中这么长时间，防止立即又被换出。
+      min_hold_duration: "1m"
+
+# -----------------------------------------------------------------------------
+# 3. 连接池与负载均衡 (Pools & Load Balancing)
+# -----------------------------------------------------------------------------
+# 为`selector`选出的“活跃集”IP创建和管理暖连接池。
+pools:
+  # 负载均衡算法: 当有多个活跃IP时，如何在新连接之间分配它们。
+  # "least_connections": 选择当前活跃连接数最少的IP。 (推荐)
+  # "round_robin":       轮询。
+  # "random":            随机选择。
+  algorithm: "least_connections"
+
+  # 连接池通用配置
+  common:
+    # 创建一个新TCP连接（Dial）的超时时间。
+    dial_timeout: "2s"
+    # 连接在池中保持空闲的最大时间。超时后将被关闭并重新创建以保持活性。
+    idle_timeout: "10m"
+    # 当一个IP被从活跃集中移除时，等待池中现有连接处理完业务的最大时间（排空超时）。
+    drain_timeout: "30s"
+
+  # 连接池策略: 定义池的大小如何管理。
+  strategy:
+    # 策略类型。
+    # "static":  固定大小的连接池。
+    # "dynamic": 根据流量动态伸缩的连接池。
+    type: "dynamic"
+
+    # 当 type = "static" 时生效
+    static:
+      # 每个活跃IP的固定连接池大小。
+      size_per_remote: 50
+
+    # 当 type = "dynamic" 时生效
+    dynamic:
+      min_size: 20 # 每个活跃IP的最小预热连接数（保底连接数）。
+      max_size: 500 # 每个活跃IP的最大连接数（硬上限）。
+      
+      # 动态伸缩具体配置
+      scaling:
+        # 检查并调整池大小的频率。
+        interval: "1s"
+        # 目标缓冲比例。
+        # 预连接数 = (近期峰值并发数) * (1 + target_buffer_ratio)。
+        # 0.2 表示希望保持20%的冗余连接以应对突发流量。
+        target_buffer_ratio: 0.2
+        # 每次扩容时最少增加的连接数。
+        scale_up_increment: 10
+        # 每次缩容时最少减少的连接数。
+        scale_down_increment: 5
