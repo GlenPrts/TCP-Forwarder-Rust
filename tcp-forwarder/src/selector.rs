@@ -45,16 +45,13 @@ pub async fn selector_task(
     
     info!("选择器任务已启动，评估间隔: {:?}", config.evaluation_interval);
     
-    // 等待5秒，确保系统稳定后再开始周期性评估
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    
-    // 在启动时立即执行一次评估，不等待第一个时间间隔
+    // 在启动时立即执行一次评估，不等待，确保在TCP服务器启动前就有活跃IP
     debug!("执行启动时的初始IP选择评估");
     match evaluate_and_select(&score_board, &active_remotes, &config, &mut last_change_time).await {
         Ok(change_event) => {
             if !change_event.added.is_empty() || !change_event.removed.is_empty() {
                 info!(
-                    "活跃IP列表已更新: 添加 {} 个, 移除 {} 个, 保持 {} 个",
+                    "初始活跃IP列表已设置: 添加 {} 个, 移除 {} 个, 保持 {} 个",
                     change_event.added.len(),
                     change_event.removed.len(),
                     change_event.unchanged.len()
@@ -66,13 +63,19 @@ pub async fn selector_task(
                 let total_active = change_event.added.len() + change_event.unchanged.len();
                 METRICS.record_active_ips(total_active as f64);
             } else {
-                debug!("初始活跃IP: {:?}", change_event.unchanged.len());
+                info!("初始活跃IP设置: {} 个IP", change_event.unchanged.len());
+                if change_event.unchanged.len() > 0 {
+                    METRICS.record_active_ips(change_event.unchanged.len() as f64);
+                }
             }
         }
         Err(e) => {
-            warn!("评估IP时发生错误: {}", e);
+            warn!("初始IP评估时发生错误: {}", e);
         }
     }
+    
+    // 等待2秒让系统稳定，然后开始周期性评估
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // match evaluate_and_select(&score_board, &active_remotes, &config, &mut last_change_time).await {
     //     Ok(change_event) => {
@@ -145,6 +148,12 @@ async fn evaluate_and_select(
     // 按分数从高到低排序
     scored_ips.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     
+    // 记录前几个IP的分数用于调试
+    debug!("IP评分情况（前10个）:");
+    for (i, (ip, score)) in scored_ips.iter().take(10).enumerate() {
+        debug!("  #{}: {} 分数: {:.2}", i + 1, ip, score);
+    }
+    
     // 应用最低分数阈值过滤
     let qualified_ips: Vec<IpAddr> = scored_ips
         .iter()
@@ -152,7 +161,12 @@ async fn evaluate_and_select(
         .map(|(ip, _)| *ip)
         .collect();
     
-    debug!("符合最低分数要求的IP: {}/{}", qualified_ips.len(), scored_ips.len());
+    info!(
+        "符合最低分数要求的IP: {}/{} (阈值: {:.1})", 
+        qualified_ips.len(), 
+        scored_ips.len(),
+        config.min_score_threshold
+    );
     
     // 确定要选择的IP数量，不超过配置的最大数量和合格IP总数
     let target_size = std::cmp::min(config.active_set_size as usize, qualified_ips.len());

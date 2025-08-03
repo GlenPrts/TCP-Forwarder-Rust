@@ -4,6 +4,7 @@ mod probing;
 mod selector;
 mod pools;
 mod metrics;
+mod loadbalancer;
 
 use anyhow::{Context, Result};
 use config::{Config};
@@ -23,6 +24,7 @@ use tracing_subscriber::EnvFilter;
 use selector::ActiveRemotes;
 
 use crate::metrics::METRICS;
+use crate::loadbalancer::{LoadBalancer, LoadBalanceAlgorithm};
 
 /// 主函数
 #[tokio::main]
@@ -69,6 +71,18 @@ async fn main() -> Result<()> {
     // 创建连接池管理器
     let pool_manager = pools::create_pool_manager();
 
+    // 创建负载均衡器
+    let algorithm = LoadBalanceAlgorithm::from_str(&config.pools.algorithm);
+    let load_balancer = Arc::new(LoadBalancer::new(algorithm));
+    info!("负载均衡器已创建，使用算法: {}", load_balancer.algorithm_name());
+
+    // 启动负载均衡器管理任务
+    let lb_manager_task = load_balancer.clone();
+    let lb_active_remotes = active_remotes.clone();
+    tokio::spawn(async move {
+        loadbalancer::load_balancer_manager_task(lb_manager_task, lb_active_remotes).await;
+    });
+
     // 启动选择器任务（在初始探测完成后，选择器会立即执行一次评估）
     let selector_score_board = score_board.clone();
     let selector_active_remotes = active_remotes.clone();
@@ -78,6 +92,33 @@ async fn main() -> Result<()> {
             error!("选择器任务错误: {}", e);
         }
     });
+
+    // 等待选择器完成初始IP评估（最多等待10秒）
+    info!("等待选择器完成初始IP评估...");
+    let mut wait_attempts = 0;
+    let max_wait_attempts = 50; // 每次等待200ms，最多10秒
+    
+    while wait_attempts < max_wait_attempts {
+        let active_ips = active_remotes.read().await;
+        if !active_ips.is_empty() {
+            info!("选择器已完成初始评估，找到 {} 个活跃IP", active_ips.len());
+            break;
+        }
+        drop(active_ips);
+        
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        wait_attempts += 1;
+    }
+    
+    // 检查是否成功获得活跃IP
+    {
+        let active_ips = active_remotes.read().await;
+        if active_ips.is_empty() {
+            warn!("等待超时，选择器尚未找到任何活跃IP，TCP服务器将仍然启动但可能无法处理连接");
+        } else {
+            info!("系统已准备就绪，活跃IP: {:?}", *active_ips);
+        }
+    }
 
     // 启动周期性探测任务（用于后续的定期更新）
     let probing_score_board = score_board.clone();
@@ -162,9 +203,18 @@ async fn main() -> Result<()> {
                 let remote_port_clone = remote_port;
                 let score_board_clone = score_board.clone();
                 let pool_manager_clone = pool_manager.clone();
+                let load_balancer_clone = load_balancer.clone();
                 
                 tokio::spawn(async move {
-                    let result = handle_connection(client_socket, client_addr, ar_clone, score_board_clone, pool_manager_clone, remote_port_clone).await;
+                    let result = handle_connection(
+                        client_socket, 
+                        client_addr, 
+                        ar_clone, 
+                        score_board_clone, 
+                        pool_manager_clone, 
+                        load_balancer_clone,
+                        remote_port_clone
+                    ).await;
                     
                     // 记录连接结束
                     METRICS.record_connection_closed();
@@ -262,25 +312,29 @@ fn load_ip_list(score_board: &scorer::ScoreBoard, config: &config::RemotesConfig
 }
 
 /// 处理单个客户端连接
-#[instrument(skip(client_socket, active_remotes, score_board, pool_manager))]
+#[instrument(skip(client_socket, active_remotes, score_board, pool_manager, load_balancer))]
 async fn handle_connection(
     mut client_socket: TcpStream, 
     client_addr: SocketAddr,
     active_remotes: ActiveRemotes,
     score_board: scorer::ScoreBoard,
     pool_manager: pools::PoolManager,
+    load_balancer: Arc<LoadBalancer>,
     remote_port: u16
 ) -> Result<()> {
-    // 从活跃IP列表中选择一个目标IP
-    let selected_ip = match select_target_ip(&active_remotes).await {
+    // 使用负载均衡器选择目标IP
+    let selected_ip = match load_balancer.select_target_ip(&active_remotes, Some(&pool_manager)).await {
         Ok(ip) => ip,
         Err(e) => {
             warn!("无法选择目标IP: {}", e);
             // 等待一下再重试，也许活跃IP列表会更新
             tokio::time::sleep(Duration::from_millis(500)).await;
-            select_target_ip(&active_remotes).await?
+            load_balancer.select_target_ip(&active_remotes, Some(&pool_manager)).await?
         }
     };
+    
+    // 记录连接开始（用于负载均衡统计）
+    load_balancer.on_connection_start(selected_ip).await;
     
     // 构建完整的远程地址（IP:端口）
     let remote_addr = format!("{}:{}", selected_ip, remote_port);
@@ -332,7 +386,12 @@ async fn handle_connection(
     
     // 开始双向数据转发
     info!("开始在 {} 和 {} 之间转发数据", client_addr, remote_addr);
-    match copy_bidirectional(&mut client_socket, &mut remote_socket).await {
+    let transfer_result = copy_bidirectional(&mut client_socket, &mut remote_socket).await;
+    
+    // 记录连接结束（用于负载均衡统计）
+    load_balancer.on_connection_end(selected_ip).await;
+    
+    match transfer_result {
         Ok((to_remote, to_client)) => {
             // 记录传输字节数
             METRICS.record_transfer_bytes(to_remote + to_client);
@@ -347,39 +406,6 @@ async fn handle_connection(
             // 记录错误，但仍然返回错误，以便上层处理
             warn!("数据转发过程中连接中断: {}", e);
             Err(e).context("数据转发失败")
-        }
-    }
-}
-
-/// 从活跃IP列表中选择一个目标IP
-///
-/// 根据配置的负载均衡算法选择最适合的IP
-async fn select_target_ip(active_remotes: &ActiveRemotes) -> Result<IpAddr> {
-    // 获取活跃IP列表的读锁
-    let ips = active_remotes.read().await;
-    
-    // 检查列表是否为空
-    if ips.is_empty() {
-        debug!("活跃IP列表为空，无法选择目标IP");
-        return Err(anyhow::anyhow!("没有可用的活跃IP"));
-    }
-    
-    debug!("当前活跃IP列表大小: {}", ips.len());
-    
-    // 目前使用简单的随机选择策略
-    // 未来可以根据配置实现不同的负载均衡算法：
-    // - least_connections: 选择当前活跃连接数最少的IP
-    // - round_robin: 轮询选择
-    // - random: 随机选择 (当前实现)
-    let mut rng = rand::rng();
-    match ips.choose(&mut rng) {
-        Some(ip) => {
-            debug!("通过随机算法选择目标IP: {}", ip);
-            Ok(*ip)
-        },
-        None => {
-            error!("无法从活跃IP列表中选择IP，列表大小: {}", ips.len());
-            Err(anyhow::anyhow!("无法选择目标IP"))
         }
     }
 }
