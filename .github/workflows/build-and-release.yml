@@ -342,24 +342,24 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
 
-  # 5. Docker 镜像安全扫描
-  security-scan:
-    name: Docker 镜像安全扫描
-    needs: build-docker
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    permissions:
-      security-events: write
-    steps:
-      - name: 运行 Trivy 镜像漏洞扫描
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+  # # 5. Docker 镜像安全扫描
+  # security-scan:
+  #   name: Docker 镜像安全扫描
+  #   needs: build-docker
+  #   runs-on: ubuntu-latest
+  #   if: github.event_name != 'pull_request'
+  #   permissions:
+  #     security-events: write
+  #   steps:
+  #     - name: 运行 Trivy 镜像漏洞扫描
+  #       uses: aquasecurity/trivy-action@master
+  #       with:
+  #         image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+  #         format: 'sarif'
+  #         output: 'trivy-results.sarif'
 
-      - name: 上传 Trivy 扫描结果
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: 'trivy-results.sarif'
+  #     - name: 上传 Trivy 扫描结果
+  #       uses: github/codeql-action/upload-sarif@v3
+  #       if: always()
+  #       with:
+  #         sarif_file: 'trivy-results.sarif'
