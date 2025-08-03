@@ -1,9 +1,15 @@
 mod config;
+mod scorer;
+mod probing;
 
 use anyhow::{Context, Result};
 use config::{Config};
 use std::path::Path;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr};
+use std::sync::Arc;
+use std::time::Instant;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::copy_bidirectional;
 use tracing::{info, warn, error, debug, Level, instrument};
@@ -25,15 +31,28 @@ async fn main() -> Result<()> {
         "TCP转发服务已启动"
     );
     
+    // 创建评分板
+    let score_board = scorer::create_score_board();
+    
+    // 从配置文件加载IP列表
+    load_ip_list(&score_board, &config.remotes)?;
+    
+    // 启动探测任务
+    let probing_score_board = score_board.clone();
+    let probing_config = config.remotes.clone();
+    tokio::spawn(async move {
+        probing::probing_task(probing_score_board, probing_config).await;
+    });
+    
+    // 硬编码一个远程地址（在阶段2中仍使用，但实际上我们已经有了IP列表）
+    let remote_addr = "5.10.214.29:443";
+    
     // 创建TCP监听器
     let listener = TcpListener::bind(config.server.listen_addr)
         .await
         .context("无法绑定到指定地址")?;
     
     info!("TCP服务器已启动，正在监听: {}", config.server.listen_addr);
-    
-    // 硬编码一个远程地址（在阶段1中）
-    let remote_addr = "5.10.214.29:443";
     
     // 主循环：接受新的连接并处理
     loop {
@@ -73,6 +92,59 @@ fn load_config(config_path: impl AsRef<Path>) -> Result<Config> {
         .context("无法将配置反序列化为Config结构体")?;
     
     Ok(config)
+}
+
+/// 加载IP列表
+fn load_ip_list(score_board: &scorer::ScoreBoard, config: &config::RemotesConfig) -> Result<()> {
+    // 目前只支持从文件加载
+    if config.provider.provider_type != "file" || config.provider.file.is_none() {
+        return Err(anyhow::anyhow!("只支持从文件加载IP列表"));
+    }
+    
+    let file_config = config.provider.file.as_ref().unwrap();
+    let file_path = &file_config.path;
+    
+    info!("从文件加载IP列表: {:?}", file_path);
+    
+    let file = File::open(file_path)
+        .context(format!("无法打开IP列表文件: {:?}", file_path))?;
+    
+    let reader = BufReader::new(file);
+    let mut count = 0;
+    
+    for line in reader.lines() {
+        let line = line.context("读取IP列表行失败")?;
+        let line = line.trim();
+        
+        // 跳过空行和注释
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        
+        // 尝试解析IP地址
+        let ip: IpAddr = match line.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                warn!("无法解析IP地址: {}, 错误: {}", line, e);
+                continue;
+            }
+        };
+        
+        // 创建初始评分数据
+        let score_data = scorer::ScoreData::new(
+            ip,
+            config.default_remote_port,
+            &config.scoring,
+        );
+        
+        // 添加到评分板
+        score_board.insert(ip, score_data);
+        count += 1;
+    }
+    
+    info!("已加载 {} 个IP地址到评分系统", count);
+    
+    Ok(())
 }
 
 /// 处理单个客户端连接

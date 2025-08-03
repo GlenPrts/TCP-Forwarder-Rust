@@ -18,3 +18,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 humantime-serde = "1.1"
 # 错误处理
 anyhow = "1.0"
+# 并发数据结构
+dashmap = "5.4"

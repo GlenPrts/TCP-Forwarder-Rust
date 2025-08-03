@@ -47,7 +47,7 @@ pub struct MetricsConfig {
 }
 
 // 远程端点管理配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RemotesConfig {
     /// 默认远程端口
     pub default_remote_port: u16,
@@ -62,7 +62,7 @@ pub struct RemotesConfig {
 }
 
 // IP源提供者配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ProviderConfig {
     /// 源类型: file, http, dns_srv
     #[serde(rename = "type")]
@@ -73,7 +73,7 @@ pub struct ProviderConfig {
 }
 
 // 文件提供者配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct FileProviderConfig {
     /// IP列表文件路径
     pub path: PathBuf,
@@ -82,7 +82,7 @@ pub struct FileProviderConfig {
 }
 
 // 评分探测配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ProbingConfig {
     /// 探测间隔
     #[serde(with = "humantime_serde")]
@@ -95,7 +95,7 @@ pub struct ProbingConfig {
 }
 
 // 评分模型配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ScoringConfig {
     /// 权重配置
     pub weights: ScoringWeightsConfig,
@@ -112,7 +112,7 @@ pub struct ScoringConfig {
 }
 
 // 权重配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ScoringWeightsConfig {
     /// 延迟权重
     pub latency: f64,
@@ -123,7 +123,7 @@ pub struct ScoringWeightsConfig {
 }
 
 // 延迟评分配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct LatencyConfig {
     /// 最大得分
     pub max_score: f64,
@@ -138,7 +138,7 @@ pub struct LatencyConfig {
 }
 
 // 抖动评分配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct JitterConfig {
     /// 最大得分
     pub max_score: f64,
@@ -153,7 +153,7 @@ pub struct JitterConfig {
 }
 
 // 成功率评分配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SuccessRateConfig {
     /// 最大得分
     pub max_score: f64,
@@ -162,7 +162,7 @@ pub struct SuccessRateConfig {
 }
 
 // 失败惩罚配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct FailurePenaltyConfig {
     /// 基础惩罚
     pub base_penalty: f64,
@@ -175,7 +175,7 @@ pub struct FailurePenaltyConfig {
 }
 
 // 历史稳定性奖励配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct HistoricalBonusConfig {
     /// 最大奖励
     pub max_bonus: f64,
@@ -184,7 +184,7 @@ pub struct HistoricalBonusConfig {
 }
 
 // 选择器策略配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SelectorConfig {
     /// 评估周期
     #[serde(with = "humantime_serde")]
@@ -198,7 +198,7 @@ pub struct SelectorConfig {
 }
 
 // 切换策略配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SwitchingPolicyConfig {
     /// 切换阈值百分比
     pub switch_up_percent: f64,
