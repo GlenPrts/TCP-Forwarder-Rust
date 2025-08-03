@@ -92,6 +92,30 @@ pub struct ProbingConfig {
     pub timeout: std::time::Duration,
     /// 每次探测的候选IP数量
     pub probe_candidate_count: usize,
+    /// 初始探测配置
+    pub initial: Option<InitialProbingConfig>,
+}
+
+// 初始探测配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct InitialProbingConfig {
+    /// 是否启用启动时的初始探测
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 初始探测的最大并发数
+    #[serde(default = "default_initial_concurrency")]
+    pub max_concurrency: usize,
+    /// 初始探测的超时时间（如果未设置，使用常规探测超时）
+    #[serde(with = "humantime_serde", default)]
+    pub timeout: Option<std::time::Duration>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_initial_concurrency() -> usize {
+    100
 }
 
 // 评分模型配置

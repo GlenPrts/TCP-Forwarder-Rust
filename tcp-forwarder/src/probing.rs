@@ -2,10 +2,85 @@ use crate::config::RemotesConfig;
 use crate::scorer::{ScoreBoard, ScoreData};
 use crate::metrics::METRICS;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, interval};
 use tracing::{debug, info, warn, error, instrument};
+
+/// 启动时的初始探测：对所有IP进行一次快速探测以获得初始评分
+#[instrument(skip(score_board, config))]
+pub async fn initial_probing(
+    score_board: ScoreBoard,
+    config: &RemotesConfig,
+) -> anyhow::Result<()> {
+    // 检查是否启用初始探测
+    let initial_config = match &config.probing.initial {
+        Some(cfg) if cfg.enabled => cfg,
+        _ => {
+            info!("初始探测已禁用，跳过启动时探测");
+            return Ok(());
+        }
+    };
+    
+    info!("开始启动时的初始IP探测...");
+    
+    // 获取所有需要探测的IP
+    let all_ips: Vec<(IpAddr, ScoreData)> = score_board
+        .iter()
+        .map(|entry| (*entry.key(), entry.value().clone()))
+        .collect();
+    
+    let total_count = all_ips.len();
+    if total_count == 0 {
+        warn!("没有可探测的IP地址");
+        return Ok(());
+    }
+    
+    info!("总共需要探测 {} 个IP，开始并发探测（最大并发数: {}）", 
+          total_count, initial_config.max_concurrency);
+    
+    // 使用信号量控制并发数量，避免过载
+    let max_concurrent = std::cmp::min(initial_config.max_concurrency, total_count);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    
+    // 创建所有探测任务
+    let mut handles = Vec::with_capacity(total_count);
+    
+    for (ip, score_data) in all_ips {
+        let port = score_data.port;
+        let score_board = score_board.clone();
+        let config = config.clone();
+        let semaphore = semaphore.clone();
+        let addr = SocketAddr::new(ip, port);
+        
+        let handle = tokio::spawn(async move {
+            // 获取信号量许可
+            let _permit = semaphore.acquire().await.expect("信号量已关闭");
+            
+            if let Err(e) = probe_single_ip_with_timeout(addr, score_board, &config).await {
+                warn!("初始探测IP {:?} 失败: {}", addr, e);
+            }
+        });
+        handles.push(handle);
+    }
+    
+    // 等待所有探测任务完成
+    let mut completed = 0;
+    for handle in handles {
+        let _ = handle.await;
+        completed += 1;
+        
+        // 每完成10%显示进度
+        if completed % (total_count / 10).max(1) == 0 {
+            debug!("初始探测进度: {}/{} ({:.1}%)", completed, total_count, 
+                   (completed as f64 / total_count as f64) * 100.0);
+        }
+    }
+    
+    info!("初始IP探测完成，共探测了 {} 个IP", total_count);
+    Ok(())
+}
 
 /// 探测任务：周期性地探测IP并更新评分
 #[instrument(skip(score_board, config))]
@@ -77,6 +152,32 @@ fn select_probe_candidates(
     all_ips
 }
 
+/// 探测单个IP（支持自定义超时）
+#[instrument(skip(score_board, config))]
+async fn probe_single_ip_with_timeout(
+    addr: SocketAddr,
+    score_board: ScoreBoard,
+    config: &RemotesConfig,
+) -> anyhow::Result<()> {
+    debug!("开始探测IP: {}", addr);
+    
+    // 记录探测开始
+    let ip_str = addr.ip().to_string();
+    METRICS.record_ip_probe(&ip_str);
+    
+    // 决定使用的超时时间
+    let probe_timeout = config.probing.initial
+        .as_ref()
+        .and_then(|cfg| cfg.timeout)
+        .unwrap_or(config.probing.timeout);
+    
+    let start_time = Instant::now();
+    let result = timeout(probe_timeout, TcpStream::connect(addr)).await;
+    
+    // 处理探测结果
+    process_probe_result(addr, result, start_time, score_board, config).await
+}
+
 /// 探测单个IP
 #[instrument(skip(score_board, config))]
 async fn probe_single_ip(
@@ -93,8 +194,21 @@ async fn probe_single_ip(
     let start_time = Instant::now();
     let result = timeout(config.probing.timeout, TcpStream::connect(addr)).await;
     
+    // 处理探测结果
+    process_probe_result(addr, result, start_time, score_board, config).await
+}
+
+/// 处理探测结果的公共逻辑
+async fn process_probe_result(
+    addr: SocketAddr,
+    result: Result<Result<TcpStream, std::io::Error>, tokio::time::error::Elapsed>,
+    start_time: Instant,
+    score_board: ScoreBoard,
+    config: &RemotesConfig,
+) -> anyhow::Result<()> {
     // 获取此IP的评分数据
     let ip = addr.ip();
+    let ip_str = addr.ip().to_string();
     let mut success = false;
     let mut latency = None;
     

@@ -68,13 +68,22 @@ remotes:
   # 这取代了传统的健康检查，探测的目的是为了更新评分，而非简单判断死活。
   probing:
     # 对一组候选IP执行一次探测的周期。
-    interval: "5s"
+    interval: "15s"
     # 单次探测连接的TCP握手超时时间。
     timeout: "1s"
     # 每次探测时，选择多少个候选IP进行尝试。
     # 这可以避免对所有IP造成周期性压力，同时保证评分数据能逐步更新。
     # 系统会优先探测那些分数最陈旧或从未探测过的IP。
     probe_candidate_count: 50
+    
+    # 初始探测配置: 启动时对所有IP进行一次快速探测以获得初始评分
+    initial:
+      # 是否启用启动时的初始探测 (默认: true)
+      enabled: true
+      # 初始探测的最大并发数 (默认: 100)
+      max_concurrency: 100
+      # 初始探测的超时时间，如果未设置则使用常规探测超时
+      timeout: "500ms"
 
   # 评分模型 (Scoring Model): 基于探测和实际建连数据，为每个IP动态打分。
   scoring:

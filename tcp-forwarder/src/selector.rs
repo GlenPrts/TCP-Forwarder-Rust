@@ -42,14 +42,56 @@ pub async fn selector_task(
     
     // 记录上次评估时间，用于实现防抖策略
     let mut last_change_time = Instant::now();
-
+    
     info!("选择器任务已启动，评估间隔: {:?}", config.evaluation_interval);
+    
+    // 等待5秒，确保系统稳定后再开始周期性评估
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    
+    // 在启动时立即执行一次评估，不等待第一个时间间隔
+    debug!("执行启动时的初始IP选择评估");
+    match evaluate_and_select(&score_board, &active_remotes, &config, &mut last_change_time).await {
+        Ok(change_event) => {
+            if !change_event.added.is_empty() || !change_event.removed.is_empty() {
+                info!(
+                    "活跃IP列表已更新: 添加 {} 个, 移除 {} 个, 保持 {} 个",
+                    change_event.added.len(),
+                    change_event.removed.len(),
+                    change_event.unchanged.len()
+                );
+                debug!("添加: {:?}", change_event.added);
+                debug!("移除: {:?}", change_event.removed);
+                
+                // 记录活跃IP数量指标
+                let total_active = change_event.added.len() + change_event.unchanged.len();
+                METRICS.record_active_ips(total_active as f64);
+            } else {
+                debug!("初始活跃IP: {:?}", change_event.unchanged.len());
+            }
+        }
+        Err(e) => {
+            warn!("评估IP时发生错误: {}", e);
+        }
+    }
+
+    // match evaluate_and_select(&score_board, &active_remotes, &config, &mut last_change_time).await {
+    //     Ok(change_event) => {
+    //         info!(
+    //             "初始活跃IP列表已设置: 添加 {} 个IP",
+    //             change_event.added.len()
+    //         );
+    //         debug!("初始活跃IP: {:?}", change_event.added);
+            
+    //         // 记录活跃IP数量指标
+    //         METRICS.record_active_ips(change_event.added.len() as f64);
+    //     }
+    //     Err(e) => {
+    //         warn!("初始IP评估时发生错误: {}", e);
+    //     }
+    // }
 
     // 周期性执行选择逻辑
     loop {
-        // 等待下一个时间间隔
-        interval_timer.tick().await;
-        
         // 执行评估和选择逻辑
         match evaluate_and_select(&score_board, &active_remotes, &config, &mut last_change_time).await {
             Ok(change_event) => {
@@ -74,6 +116,9 @@ pub async fn selector_task(
                 warn!("评估IP时发生错误: {}", e);
             }
         }
+
+        // 等待下一个时间间隔
+        interval_timer.tick().await;
     }
 }
 

@@ -8,19 +8,20 @@ headers = {
 url = "http://127.0.0.1:1234"
 
 n = 200
+thread_count = 10
 success_count = 0
 fail_count = 0
 # 使用多线程进行请求
 def send_requests():
     global success_count, fail_count
-    for _ in range(n // 10):
+    for _ in range(n // thread_count):
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             success_count += 1
         else:
             fail_count += 1
 threads = []
-for _ in range(10):
+for _ in range(thread_count):
     thread = threading.Thread(target=send_requests)
     threads.append(thread)
     thread.start()

@@ -129,12 +129,6 @@ impl MetricsManager {
         counter!("tcp_forwarder_pool_misses").increment(1);
     }
 
-    /// 记录连接池中的连接数
-    pub fn record_pool_size(&self, _ip: &str, _size: f64) {
-        // 暂时简化实现，不记录具体IP的池大小
-        // gauge!("tcp_forwarder_pool_connections", size);
-    }
-
     /// 记录连接池创建连接
     pub fn record_pool_connection_created(&self) {
         counter!("tcp_forwarder_pool_connections_created").increment(1);
@@ -209,6 +203,41 @@ impl MetricsManager {
     pub fn record_error(&self) {
         counter!("tcp_forwarder_errors_total").increment(1);
     }
+
+    /// 记录连接池大小
+    pub fn record_pool_size(&self, _ip: &str, _size: f64) {
+        gauge!("tcp_forwarder_pool_connections", "ip" => _ip.to_string()).set(_size);
+    }
+
+    /// 记录连接池扩容
+    pub fn record_pool_scaled_up(&self, ip: String, count: usize) {
+        counter!("tcp_forwarder_pool_scale_up_total", "ip" => ip.clone()).increment(count as u64);
+        gauge!("tcp_forwarder_pool_last_scale_up_count", "ip" => ip).set(count as f64);
+    }
+
+    /// 记录连接池缩容
+    pub fn record_pool_scaled_down(&self, ip: String, count: usize) {
+        counter!("tcp_forwarder_pool_scale_down_total", "ip" => ip.clone()).increment(count as u64);
+        gauge!("tcp_forwarder_pool_last_scale_down_count", "ip" => ip).set(count as f64);
+    }
+
+    /// 记录详细连接池统计
+    pub fn record_pool_statistics(&self, ip: String, total: usize, available: usize, active: usize) {
+        gauge!("tcp_forwarder_pool_total_connections", "ip" => ip.clone()).set(total as f64);
+        gauge!("tcp_forwarder_pool_available_connections", "ip" => ip.clone()).set(available as f64);
+        gauge!("tcp_forwarder_pool_active_connections", "ip" => ip.clone()).set(active as f64);
+        
+        // 计算利用率
+        if total > 0 {
+            let utilization = (active as f64 / total as f64) * 100.0;
+            gauge!("tcp_forwarder_pool_utilization_percent", "ip" => ip).set(utilization);
+        }
+    }
+
+    /// 记录连接池峰值并发
+    pub fn record_pool_peak_concurrency(&self, ip: String, peak: usize) {
+        gauge!("tcp_forwarder_pool_peak_concurrency", "ip" => ip).set(peak as f64);
+    }
 }
 
 /// 指标处理器
@@ -239,6 +268,17 @@ fn register_metrics() {
     describe_counter!("tcp_forwarder_pool_connections_closed", "连接池关闭连接数");
     describe_counter!("tcp_forwarder_pool_health_checks_passed", "连接池健康检查通过数");
     describe_counter!("tcp_forwarder_pool_health_checks_failed", "连接池健康检查失败数");
+    
+    // 动态连接池伸缩指标
+    describe_counter!("tcp_forwarder_pool_scale_up_total", "连接池扩容次数");
+    describe_counter!("tcp_forwarder_pool_scale_down_total", "连接池缩容次数");
+    describe_gauge!("tcp_forwarder_pool_last_scale_up_count", "上次扩容连接数");
+    describe_gauge!("tcp_forwarder_pool_last_scale_down_count", "上次缩容连接数");
+    describe_gauge!("tcp_forwarder_pool_total_connections", "连接池总连接数");
+    describe_gauge!("tcp_forwarder_pool_available_connections", "连接池可用连接数");
+    describe_gauge!("tcp_forwarder_pool_active_connections", "连接池活跃连接数");
+    describe_gauge!("tcp_forwarder_pool_utilization_percent", "连接池利用率百分比");
+    describe_gauge!("tcp_forwarder_pool_peak_concurrency", "连接池峰值并发数");
     
     // IP和评分相关指标
     describe_gauge!("tcp_forwarder_active_ips", "活跃IP数量");

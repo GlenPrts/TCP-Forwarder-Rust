@@ -55,28 +55,36 @@ async fn main() -> Result<()> {
     // 从配置文件加载IP列表
     load_ip_list(&score_board, &config.remotes)?;
     
+    // 执行启动时的初始探测，快速获得所有IP的初始评分
+    info!("开始初始化IP探测，为快速启动准备...");
+    if let Err(e) = probing::initial_probing(score_board.clone(), &config.remotes).await {
+        warn!("初始探测失败，但不影响后续运行: {}", e);
+    } else {
+        info!("初始探测完成，系统已准备好处理连接");
+    }
+    
     // 创建活跃远程地址列表
     let active_remotes = Arc::new(tokio::sync::RwLock::new(Vec::new()));
     
     // 创建连接池管理器
     let pool_manager = pools::create_pool_manager();
-    
-    // 启动探测任务
-    let probing_score_board = score_board.clone();
-    let probing_config = config.remotes.clone();
-    tokio::spawn(async move {
-        if let Err(e) = probing::probing_task(probing_score_board, probing_config).await {
-            error!("探测任务错误: {}", e);
-        }
-    });
-    
-    // 启动选择器任务
+
+    // 启动选择器任务（在初始探测完成后，选择器会立即执行一次评估）
     let selector_score_board = score_board.clone();
     let selector_active_remotes = active_remotes.clone();
     let selector_config = config.remotes.selector.clone();
     tokio::spawn(async move {
         if let Err(e) = selector::selector_task(selector_score_board, selector_active_remotes, selector_config).await {
             error!("选择器任务错误: {}", e);
+        }
+    });
+
+    // 启动周期性探测任务（用于后续的定期更新）
+    let probing_score_board = score_board.clone();
+    let probing_config = config.remotes.clone();
+    tokio::spawn(async move {
+        if let Err(e) = probing::probing_task(probing_score_board, probing_config).await {
+            error!("探测任务错误: {}", e);
         }
     });
     
