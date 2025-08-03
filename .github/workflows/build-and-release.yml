@@ -13,37 +13,6 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # # 代码质量检查
-  # quality-check:
-  #   name: Code Quality Check
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-
-  #     - name: Setup Rust
-  #       uses: dtolnay/rust-toolchain@stable
-  #       with:
-  #         components: rustfmt, clippy
-
-  #     - name: Cache cargo registry
-  #       uses: actions/cache@v4
-  #       with:
-  #         path: |
-  #           ~/.cargo/registry
-  #           ~/.cargo/git
-  #           tcp-forwarder/target
-  #         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-  #     - name: Check formatting
-  #       run: cd tcp-forwarder && cargo fmt --all -- --check
-
-  #     - name: Run clippy
-  #       run: cd tcp-forwarder && cargo clippy --all-targets --all-features -- -D warnings
-
-  #     - name: Run tests
-  #       run: cd tcp-forwarder && cargo test --verbose
-
   # 多平台构建二进制文件
   build-binaries:
     name: Build Binary (${{ matrix.target }})
