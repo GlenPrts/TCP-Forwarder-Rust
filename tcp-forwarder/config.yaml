@@ -60,7 +60,7 @@ remotes:
     # 当 type = "file" 时，使用此配置块。
     file:
       # IP列表文件的路径。文件内容应为每行一个IP地址。
-      path: "./test_ip_list.txt"
+      path: "./ip_list.txt"
       # 是否监视文件变动。如果为 true，当文件内容发生变化时，应用会自动重载IP列表。(暂未实现)
       watch: false
 

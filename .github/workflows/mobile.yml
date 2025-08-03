@@ -37,6 +37,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          
+      - name: Install bindgen-cli
+        run: cargo install --force --locked bindgen-cli
 
       - name: 安装 Android NDK
         uses: nttld/setup-ndk@v1

@@ -36,6 +36,8 @@ tower-http = { version = "0.6", features = ["cors"] }
 # IP网络处理
 ipnetwork = "0.21.1"
 
+aws-lc-rs = "1.13.3"
+
 [features]
 default = ["metrics-export", "web-server"]
 # 指标导出功能
