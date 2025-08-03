@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn, instrument};
 use crate::config::RemotesConfig;
 use crate::scorer::ScoreBoard;
 use crate::selector::ActiveRemotes;
+use crate::metrics;
 
 /// 连接池管理器类型定义
 pub type PoolManager = Arc<DashMap<IpAddr, PoolState>>;
@@ -228,20 +229,6 @@ async fn filler_task(
             break;
         }
         
-        // 检查连接池是否已满
-        // 尝试预留一个发送位置，如果失败说明池已满
-        match pool_state.sender.try_reserve() {
-            Ok(_permit) => {
-                // 有可用空间，继续创建连接
-                // 注意：这里我们只是检查容量，不实际发送，所以丢弃permit
-            }
-            Err(_) => {
-                // 连接池已满，暂停一段时间后再检查
-                debug!("连接池已满，等待空间释放: {}", target_addr);
-                sleep(fill_interval).await;
-                continue;
-            }
-        }
         
         // 尝试创建新连接
         let start_time = std::time::Instant::now();
@@ -257,11 +244,19 @@ async fn filler_task(
                     score_data.record_success(connect_time);
                 }
                 
+                // 记录指标
+                let ip_str = ip.to_string();
+                metrics::record_pool_connection_created(&ip_str);
+                
                 // 尝试将连接添加到池中
                 if let Err(_) = pool_state.sender.try_send(stream) {
                     // 发送失败，可能是因为池已满或接收端已关闭
                     // 这种情况下连接会自动关闭
                     debug!("无法将连接添加到池中，可能池已满: {}", target_addr);
+                } else {
+                    // 成功添加到池中，更新池大小指标
+                    // 注意：这里我们不能准确知道当前池的大小，只是记录成功添加了连接
+                    debug!("成功将连接添加到池中: {}", target_addr);
                 }
             }
             Ok(Err(e)) => {
@@ -272,6 +267,10 @@ async fn filler_task(
                 if let Some(mut score_data) = score_board.get_mut(&ip) {
                     score_data.record_failure();
                 }
+                
+                // 记录指标
+                let ip_str = ip.to_string();
+                metrics::record_pool_connection_failed(&ip_str);
                 
                 // 连接失败时等待更长时间再重试
                 sleep(fill_interval * 2).await;
@@ -285,6 +284,10 @@ async fn filler_task(
                 if let Some(mut score_data) = score_board.get_mut(&ip) {
                     score_data.record_failure();
                 }
+                
+                // 记录指标
+                let ip_str = ip.to_string();
+                metrics::record_pool_connection_failed(&ip_str);
                 
                 // 超时时等待更长时间再重试
                 sleep(fill_interval * 2).await;
@@ -307,14 +310,36 @@ pub async fn get_connection_from_pool(
     ip: IpAddr,
 ) -> Option<TcpStream> {
     if let Some(pool_state) = pool_manager.get(&ip) {
-        let mut receiver = pool_state.receiver.lock().await;
+        // 检查连接池是否仍然活跃
+        if !pool_state.is_active().await {
+            debug!("IP {} 的连接池已不活跃，无法获取连接", ip);
+            return None;
+        }
+        
+        // 尝试获取接收端锁，但设置超时避免死锁
+        let receiver_lock = match tokio::time::timeout(
+            Duration::from_millis(100), 
+            pool_state.receiver.lock()
+        ).await {
+            Ok(lock) => lock,
+            Err(_) => {
+                debug!("获取IP {} 连接池接收端锁超时", ip);
+                return None;
+            }
+        };
+        
+        let mut receiver = receiver_lock;
         match receiver.try_recv() {
             Ok(stream) => {
                 debug!("从连接池获取到 {} 的连接", ip);
                 Some(stream)
             }
-            Err(_) => {
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                 debug!("连接池中没有可用的 {} 连接", ip);
+                None
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                debug!("IP {} 连接池接收端已断开", ip);
                 None
             }
         }

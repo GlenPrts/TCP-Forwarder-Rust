@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::SelectorConfig;
 use crate::scorer::ScoreBoard;
+use crate::metrics;
 
 /// 活跃远程地址集合，用于存储当前被选为最优的IP地址列表
 pub type ActiveRemotes = Arc<RwLock<Vec<IpAddr>>>;
@@ -61,6 +62,10 @@ pub async fn selector_task(
                     );
                     debug!("添加: {:?}", change_event.added);
                     debug!("移除: {:?}", change_event.removed);
+                    
+                    // 记录活跃IP数量指标
+                    let total_active = change_event.added.len() + change_event.unchanged.len();
+                    metrics::record_active_ips(total_active as f64);
                 } else {
                     debug!("活跃IP列表未变化，当前有 {} 个活跃IP", change_event.unchanged.len());
                 }

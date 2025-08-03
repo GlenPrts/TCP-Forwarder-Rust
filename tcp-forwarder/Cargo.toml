@@ -22,3 +22,10 @@ anyhow = "1.0"
 dashmap = "5.4"
 # 随机数
 rand = "0.8"
+# 指标系统
+metrics = "0.21"
+metrics-exporter-prometheus = "0.12"
+# Web服务器
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }

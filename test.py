@@ -1,7 +1,7 @@
 import requests
 
 headers = {
-    "Host": "ip.sb"
+    "Host":"ip.sb"
 }
 
 url = "http://127.0.0.1:1234"

@@ -3,18 +3,21 @@ mod scorer;
 mod probing;
 mod selector;
 mod pools;
+mod metrics;
 
 use anyhow::{Context, Result};
 use config::{Config};
 use std::path::Path;
 use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
+use std::time::Duration;
 // 删除未使用的导入
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use rand::seq::SliceRandom;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::copy_bidirectional;
+use tokio::signal;
 use tracing::{info, warn, error, debug, Level, instrument};
 use tracing_subscriber::EnvFilter;
 use selector::ActiveRemotes;
@@ -27,6 +30,16 @@ async fn main() -> Result<()> {
     
     // 初始化日志系统
     init_logging(&config.logging)?;
+    
+    // 初始化指标系统
+    let metrics_manager = if config.metrics.enabled {
+        Some(metrics::MetricsManager::new()?)
+    } else {
+        None
+    };
+    
+    // 记录启动时间
+    let start_time = std::time::Instant::now();
     
     // 记录启动日志
     info!(
@@ -78,6 +91,28 @@ async fn main() -> Result<()> {
         }
     });
     
+    // 启动指标服务器（如果启用）
+    if let Some(metrics_manager) = metrics_manager {
+        let metrics_listen_addr = config.metrics.listen_addr;
+        let metrics_path = config.metrics.path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = metrics_manager.start_server(metrics_listen_addr, metrics_path).await {
+                error!("指标服务器错误: {}", e);
+            }
+        });
+    }
+    
+    // 启动运行时间更新任务
+    let start_time_clone = start_time;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            let uptime = start_time_clone.elapsed().as_secs_f64();
+            metrics::record_uptime(uptime);
+        }
+    });
+    
     // 记录远程端口，用于转发连接
     let remote_port = config.remotes.default_remote_port;
     
@@ -85,34 +120,63 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(config.server.listen_addr)
         .await
         .context("无法绑定到指定地址")?;
-    
+
     info!("TCP服务器已启动，正在监听: {}", config.server.listen_addr);
-    
+
     // 主循环：接受新的连接并处理
     loop {
-        // 接受新的连接
-        let (client_socket, client_addr) = match listener.accept().await {
-            Ok((socket, addr)) => (socket, addr),
-            Err(e) => {
-                error!("接受连接失败: {}", e);
-                continue;
+        tokio::select! {
+            // 监听Ctrl+C信号
+            _ = signal::ctrl_c() => {
+                info!("收到停机信号，开始优雅停机...");
+                break;
             }
-        };
-        
-        info!("接受到来自 {} 的连接", client_addr);
-        
-        // 为每个连接创建新的异步任务处理
-        let ar_clone = active_remotes.clone();
-        let remote_port_clone = remote_port;
-        let score_board_clone = score_board.clone();
-        let pool_manager_clone = pool_manager.clone();
-        
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(client_socket, client_addr, ar_clone, score_board_clone, pool_manager_clone, remote_port_clone).await {
-                error!(client_addr = %client_addr, "处理连接时出错: {}", e);
+            // 接受新的连接
+            accept_result = listener.accept() => {
+                let (client_socket, client_addr) = match accept_result {
+                    Ok((socket, addr)) => {
+                        // 记录新连接
+                        metrics::record_new_connection();
+                        (socket, addr)
+                    },
+                    Err(e) => {
+                        error!("接受连接失败: {}", e);
+                        metrics::record_error();
+                        continue;
+                    }
+                };
+                
+                info!("接受到来自 {} 的连接", client_addr);
+                
+                // 为每个连接创建新的异步任务处理
+                let ar_clone = active_remotes.clone();
+                let remote_port_clone = remote_port;
+                let score_board_clone = score_board.clone();
+                let pool_manager_clone = pool_manager.clone();
+                
+                tokio::spawn(async move {
+                    let result = handle_connection(client_socket, client_addr, ar_clone, score_board_clone, pool_manager_clone, remote_port_clone).await;
+                    
+                    // 记录连接结束
+                    metrics::record_connection_closed();
+                    
+                    if let Err(e) = result {
+                        error!(client_addr = %client_addr, "处理连接时出错: {}", e);
+                        metrics::record_connection_failed();
+                    } else {
+                        metrics::record_connection_success();
+                    }
+                });
             }
-        });
+        }
     }
+    
+    // 优雅停机：等待一段时间让现有连接完成
+    info!("等待现有连接完成处理...");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    info!("TCP转发服务已停止");
+    
+    Ok(())
 }
 
 /// 加载配置文件
@@ -194,7 +258,15 @@ async fn handle_connection(
     remote_port: u16
 ) -> Result<()> {
     // 从活跃IP列表中选择一个目标IP
-    let selected_ip = select_target_ip(&active_remotes).await?;
+    let selected_ip = match select_target_ip(&active_remotes).await {
+        Ok(ip) => ip,
+        Err(e) => {
+            warn!("无法选择目标IP: {}", e);
+            // 等待一下再重试，也许活跃IP列表会更新
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            select_target_ip(&active_remotes).await?
+        }
+    };
     
     // 构建完整的远程地址（IP:端口）
     let remote_addr = format!("{}:{}", selected_ip, remote_port);
@@ -207,30 +279,46 @@ async fn handle_connection(
         Some(socket) => {
             // 从连接池获得连接，记录连接池命中
             debug!("从连接池获得到 {} 的连接", remote_addr);
+            metrics::record_pool_hit(&selected_ip.to_string());
             socket
         }
         None => {
             // 连接池没有可用连接，进行回退：立即建立新连接
             debug!("连接池无可用连接，立即建立到 {} 的新连接", remote_addr);
+            metrics::record_pool_miss(&selected_ip.to_string());
             
             let start_time = std::time::Instant::now();
-            match TcpStream::connect(&remote_addr).await {
-                Ok(socket) => {
-                    // 连接成功，更新分数
+            
+            // 设置连接超时
+            let connect_future = TcpStream::connect(&remote_addr);
+            let timeout_duration = Duration::from_secs(10); // 10秒超时
+            
+            match tokio::time::timeout(timeout_duration, connect_future).await {
+                Ok(Ok(socket)) => {
+                    // 连接成功，更新分数和指标
+                    let connect_time = start_time.elapsed();
+                    metrics::record_connection_duration(connect_time);
+                    
                     if let Some(mut score_data) = score_board.get_mut(&selected_ip) {
-                        score_data.record_success(start_time.elapsed());
+                        score_data.record_success(connect_time);
                     }
                     
-                    let connect_time = start_time.elapsed();
                     debug!("立即连接到 {} 成功，耗时: {:?}", remote_addr, connect_time);
                     socket
                 },
-                Err(e) => {
+                Ok(Err(e)) => {
                     // 连接失败，更新分数
                     if let Some(mut score_data) = score_board.get_mut(&selected_ip) {
                         score_data.record_failure();
                     }
-                    return Err(e).context(format!("连接到远程服务器 {} 失败", remote_addr));
+                    return Err(anyhow::anyhow!("连接到远程服务器 {} 失败: {}", remote_addr, e));
+                },
+                Err(_) => {
+                    // 连接超时
+                    if let Some(mut score_data) = score_board.get_mut(&selected_ip) {
+                        score_data.record_failure();
+                    }
+                    return Err(anyhow::anyhow!("连接到远程服务器 {} 超时", remote_addr));
                 }
             }
         }
@@ -240,6 +328,9 @@ async fn handle_connection(
     info!("开始在 {} 和 {} 之间转发数据", client_addr, remote_addr);
     match copy_bidirectional(&mut client_socket, &mut remote_socket).await {
         Ok((to_remote, to_client)) => {
+            // 记录传输字节数
+            metrics::record_transfer_bytes(to_remote + to_client);
+            
             info!(
                 "连接关闭：客户端 -> 远程 {} 字节，远程 -> 客户端 {} 字节", 
                 to_remote, to_client
@@ -263,8 +354,11 @@ async fn select_target_ip(active_remotes: &ActiveRemotes) -> Result<IpAddr> {
     
     // 检查列表是否为空
     if ips.is_empty() {
+        debug!("活跃IP列表为空，无法选择目标IP");
         return Err(anyhow::anyhow!("没有可用的活跃IP"));
     }
+    
+    debug!("当前活跃IP列表大小: {}", ips.len());
     
     // 目前使用简单的随机选择策略
     // 未来可以根据配置实现不同的负载均衡算法：
@@ -277,7 +371,10 @@ async fn select_target_ip(active_remotes: &ActiveRemotes) -> Result<IpAddr> {
             debug!("通过随机算法选择目标IP: {}", ip);
             Ok(*ip)
         },
-        None => Err(anyhow::anyhow!("无法选择目标IP")),
+        None => {
+            error!("无法从活跃IP列表中选择IP，列表大小: {}", ips.len());
+            Err(anyhow::anyhow!("无法选择目标IP"))
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::config::RemotesConfig;
 use crate::scorer::{ScoreBoard, ScoreData};
+use crate::metrics;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -85,6 +86,10 @@ async fn probe_single_ip(
 ) -> anyhow::Result<()> {
     debug!("开始探测IP: {}", addr);
     
+    // 记录探测开始
+    let ip_str = addr.ip().to_string();
+    metrics::record_ip_probe(&ip_str);
+    
     let start_time = Instant::now();
     let result = timeout(config.probing.timeout, TcpStream::connect(addr)).await;
     
@@ -99,14 +104,20 @@ async fn probe_single_ip(
             success = true;
             latency = Some(start_time.elapsed());
             debug!("探测成功: {}, 延迟: {:?}", addr, latency.unwrap());
+            
+            // 记录指标
+            metrics::record_ip_probe_success(&ip_str);
+            metrics::record_probe_duration(latency.unwrap());
         },
         Ok(Err(e)) => {
             // 连接失败但在超时之前
             warn!("探测失败: {}, 错误: {}", addr, e);
+            metrics::record_ip_probe_failed(&ip_str);
         },
         Err(_) => {
             // 连接超时
             warn!("探测超时: {}", addr);
+            metrics::record_ip_probe_failed(&ip_str);
         }
     }
     
@@ -116,6 +127,10 @@ async fn probe_single_ip(
         
         // 计算并记录新的总分
         let score = entry.calculate_score(&config.scoring);
+        
+        // 记录IP评分指标
+        metrics::record_ip_score(&ip_str, score);
+        
         debug!(
             "更新IP分数: {}, 成功: {}, 新分数: {:.2}, 延迟: {:?}, 抖动: {:.2}ms", 
             addr, success, score, 
