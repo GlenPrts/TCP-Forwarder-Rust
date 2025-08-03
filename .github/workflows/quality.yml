@@ -5,6 +5,10 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+  workflow_dispatch: # 允许手动触发
+  # schedule:
+  #   # 每天 UTC 02:00 运行全面扫描
+  #   - cron: '0 2 * * *'
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,8 +18,8 @@ jobs:
     name: Code Quality Analysis
     runs-on: ubuntu-latest
     steps:
-      # - name: Checkout code
-      #   uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -107,7 +111,7 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          languages: 'cpp'  # Rust编译后的代码
+          languages: 'rust' # 明确指定为 Rust，CodeQL 支持 Rust
           queries: security-and-quality
 
       - name: Setup Rust
@@ -167,24 +171,29 @@ jobs:
           # cargo bench
           echo "性能测试配置待完善"
 
+  # --- 修正后的部分 ---
   supply-chain-security:
     name: Supply Chain Security
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: SLSA Generic Generator
-        id: generator
-        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.10.0
-        with:
-          base64-subjects: ""
-          provenance-name: "tcp-forwarder-provenance.intoto.jsonl"
-
+    # 权限对于生成SLSA provenance至关重要
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    # 'uses' 关键字在作业的顶层，表示调用一个可重用的工作流程
+    # 这个工作流程会处理自己的运行环境（runs-on）和步骤（steps）
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.10.0
+    with:
+      # 注意: 'base64-subjects' 应该包含你构建产物的 Base64 编码的 SHA256 哈希值
+      # 为了让 SLSA provenance 有意义，你通常需要一个单独的构建作业来生成产物
+      # 并将其哈希值作为输出，然后在这里使用。
+      base64-subjects: "" # 示例值，请根据实际构建产物修改
+      provenance-name: "tcp-forwarder-provenance.intoto.jsonl"
+  
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest
-    needs: [code-quality, security-audit, vulnerability-scan]
+    # 添加 'supply-chain-security' 到 needs 依赖中
+    needs: [code-quality, security-audit, vulnerability-scan, supply-chain-security]
     if: always()
     steps:
       - name: Check quality gate
@@ -195,13 +204,15 @@ jobs:
           code_quality="${{ needs.code-quality.result }}"
           security_audit="${{ needs.security-audit.result }}"
           vulnerability_scan="${{ needs.vulnerability-scan.result }}"
+          supply_chain_security="${{ needs.supply-chain-security.result }}"
           
           echo "代码质量检查: $code_quality"
           echo "安全审计: $security_audit"
           echo "漏洞扫描: $vulnerability_scan"
+          echo "供应链安全: $supply_chain_security"
           
           # 如果任何关键检查失败，则失败
-          if [[ "$code_quality" != "success" || "$security_audit" != "success" ]]; then
+          if [[ "$code_quality" != "success" || "$security_audit" != "success" || "$supply_chain_security" != "success" ]]; then
             echo "❌ 质量门禁检查失败"
             exit 1
           fi
@@ -225,11 +236,7 @@ jobs:
               repo: context.repo.repo,
               body: `## ❌ 质量门禁检查失败
               
-              代码质量或安全检查未通过，请检查以下内容：
-              
-              - 🔍 代码格式和Clippy警告
-              - 🔒 安全漏洞和依赖项审计
-              - 📋 许可证合规性
+              代码质量或安全检查未通过，请检查失败的作业日志。
               
               请修复相关问题后重新提交。`
             })
@@ -245,12 +252,5 @@ jobs:
               repo: context.repo.repo,
               body: `## ✅ 质量门禁检查通过
               
-              所有代码质量和安全检查均已通过！
-              
-              - ✅ 代码格式规范
-              - ✅ 无Clippy警告
-              - ✅ 无已知安全漏洞
-              - ✅ 依赖项审计通过
-              
-              该PR可以安全合并。`
+              所有代码质量和安全检查均已通过！该PR可以安全合并。`
             })
