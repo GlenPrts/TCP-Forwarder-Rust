@@ -87,22 +87,6 @@ pub async fn selector_task(
     // 等待2秒让系统稳定，然后开始周期性评估
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // match evaluate_and_select(&score_board, &active_remotes, &config, &mut last_change_time).await {
-    //     Ok(change_event) => {
-    //         info!(
-    //             "初始活跃IP列表已设置: 添加 {} 个IP",
-    //             change_event.added.len()
-    //         );
-    //         debug!("初始活跃IP: {:?}", change_event.added);
-
-    //         // 记录活跃IP数量指标
-    //         METRICS.record_active_ips(change_event.added.len() as f64);
-    //     }
-    //     Err(e) => {
-    //         warn!("初始IP评估时发生错误: {}", e);
-    //     }
-    // }
-
     // 周期性执行选择逻辑
     loop {
         // 执行评估和选择逻辑

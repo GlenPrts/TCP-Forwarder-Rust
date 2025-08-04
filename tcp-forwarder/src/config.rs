@@ -259,6 +259,12 @@ pub struct PoolCommonConfig {
     #[serde(with = "humantime_serde")]
     #[allow(dead_code)]
     pub drain_timeout: std::time::Duration,
+    /// 健康检查的时间间隔
+    #[serde(with = "humantime_serde")]
+    pub health_check_interval: std::time::Duration,
+    /// 连接填充检查的时间间隔
+    #[serde(with = "humantime_serde")]
+    pub filler_interval: std::time::Duration,
 }
 
 // 连接池策略配置

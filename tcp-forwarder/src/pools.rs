@@ -200,7 +200,7 @@ pub async fn create_pool_for_ip(
     dynamic_config: Option<Arc<DynamicStrategyConfig>>,
     common_config: Arc<PoolCommonConfig>,
 ) {
-    let pool_state = PoolState::new(buffer_size, dynamic_config.clone(), common_config);
+    let pool_state = PoolState::new(buffer_size, dynamic_config.clone(), common_config.clone());
     pools.insert(ip, pool_state);
 
     if let Some(pool_state_ref) = pools.get(&ip) {
@@ -209,18 +209,38 @@ pub async fn create_pool_for_ip(
         // 启动连接填充任务
         let filler_pool_state = pool_state.clone();
         let filler_dynamic_config = dynamic_config.clone();
+        let common_config_for_filler = common_config.clone();
         tokio::spawn(async move {
             if let Some(ref config) = filler_dynamic_config {
-                dynamic_filler_task(ip, port, filler_pool_state, config.clone()).await;
+                dynamic_filler_task(
+                    ip,
+                    port,
+                    filler_pool_state,
+                    config.clone(),
+                    common_config_for_filler.clone(),
+                )
+                .await;
             } else {
-                filler_task(ip, port, filler_pool_state, pool_size).await;
+                filler_task(
+                    ip,
+                    port,
+                    filler_pool_state,
+                    pool_size,
+                    common_config_for_filler.clone(),
+                )
+                .await;
             }
         });
 
         // 启动健康检查任务
         let health_check_pool_state = pool_state.clone();
+        let common_config_for_health = common_config.clone();
         tokio::spawn(async move {
-            health_check_task(health_check_pool_state).await;
+            health_check_task(
+                health_check_pool_state,
+                common_config_for_health.health_check_interval,
+            )
+            .await;
         });
 
         // 如果是动态策略，启动动态伸缩任务
@@ -389,11 +409,11 @@ async fn dynamic_filler_task(
     port: u16,
     pool_state: PoolState,
     dynamic_config: Arc<DynamicStrategyConfig>,
+    common_config: Arc<PoolCommonConfig>,
 ) {
     info!("启动动态填充任务，IP: {}", ip);
 
-    let check_interval = Duration::from_millis(500); // 更频繁的检查
-    let mut interval = interval(check_interval);
+    let mut interval = interval(common_config.filler_interval);
 
     while pool_state.is_active().await {
         interval.tick().await;
@@ -467,10 +487,8 @@ async fn dynamic_filler_task(
 }
 
 /// 连接池健康检查任务
-async fn health_check_task(pool_state: PoolState) {
-    const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-
-    let mut interval = interval(HEALTH_CHECK_INTERVAL);
+async fn health_check_task(pool_state: PoolState, health_check_interval: Duration) {
+    let mut interval = interval(health_check_interval);
 
     while pool_state.is_active().await {
         interval.tick().await;
@@ -521,8 +539,14 @@ async fn is_connection_healthy(stream: &mut TcpStream) -> bool {
 }
 
 /// 连接池填充任务，负责维护池中的连接数量
-async fn filler_task(ip: IpAddr, port: u16, pool_state: PoolState, target_size: usize) {
-    let check_interval = Duration::from_secs(5);
+async fn filler_task(
+    ip: IpAddr,
+    port: u16,
+    pool_state: PoolState,
+    target_size: usize,
+    common_config: Arc<PoolCommonConfig>,
+) {
+    let check_interval = common_config.filler_interval;
     let mut interval = interval(check_interval);
 
     while pool_state.is_active().await {
@@ -606,8 +630,8 @@ pub async fn create_connection_with_timeout_and_keepalive(
 
     // 配置TCP keepalive
     let keepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(60)) // 60秒后开始发送keepalive
-        .with_interval(Duration::from_secs(10)) // 每10秒发送一次keepalive
+        .with_time(Duration::from_secs(15)) // 15秒后开始发送keepalive
+        .with_interval(Duration::from_secs(10)) // 每5秒发送一次keepalive
         .with_retries(3); // 重试3次
 
     socket.set_tcp_keepalive(&keepalive)?;
@@ -723,7 +747,7 @@ pub async fn pool_manager_task(
 ) -> Result<()> {
     info!("启动连接池管理任务");
 
-    let mut check_interval = tokio::time::interval(Duration::from_secs(10));
+    let mut check_interval = tokio::time::interval(remotes_config.selector.evaluation_interval);
     let mut last_known_ips = std::collections::HashSet::new();
 
     loop {

@@ -167,7 +167,11 @@ pools:
     idle_timeout: "10m"
     # 当一个IP被从活跃集中移除时，等待池中现有连接处理完业务的最大时间（排空超时）。
     drain_timeout: "30s"
-
+    # 健康检查的时间间隔
+    health_check_interval: "10s"
+    # 连接填充检查的时间间隔
+    filler_interval: 50ms
+    
   # 连接池策略: 定义池的大小如何管理。
   strategy:
     # 策略类型。
