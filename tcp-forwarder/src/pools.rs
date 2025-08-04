@@ -302,7 +302,7 @@ async fn dynamic_scaling_task(
             let scale_up_count =
                 (target_size - current_total).min(dynamic_config.scaling.scale_up_increment);
             if scale_up_count > 0 {
-                info!("扩容连接池 - IP: {}, 增加 {} 个连接", ip, scale_up_count);
+                debug!("扩容连接池 - IP: {}, 增加 {} 个连接", ip, scale_up_count);
                 scale_up_pool(ip, port, &pool_state, scale_up_count).await;
                 *last_scaling_time = Instant::now();
 
@@ -317,7 +317,7 @@ async fn dynamic_scaling_task(
             let scale_down_count =
                 (current_total - target_size).min(dynamic_config.scaling.scale_down_increment);
             if scale_down_count > 0 {
-                info!("缩容连接池 - IP: {}, 减少 {} 个连接", ip, scale_down_count);
+                debug!("缩容连接池 - IP: {}, 减少 {} 个连接", ip, scale_down_count);
                 scale_down_pool(&pool_state, scale_down_count).await;
                 *last_scaling_time = Instant::now();
 
@@ -506,12 +506,12 @@ async fn health_check_task(pool_state: PoolState, health_check_interval: Duratio
                     valid_connections.push(connection);
                     METRICS.record_pool_health_check(true);
                 } else {
-                    info!("从连接池中移除无效连接");
+                    debug!("从连接池中移除无效连接");
                     METRICS.record_pool_health_check(false);
                     METRICS.record_pool_connection_closed();
                 }
             } else {
-                info!("从连接池中移除过期连接");
+                debug!("从连接池中移除过期连接");
                 METRICS.record_pool_health_check(false);
                 METRICS.record_pool_connection_closed();
             }
