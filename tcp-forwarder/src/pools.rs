@@ -508,7 +508,7 @@ async fn health_check_task(pool_state: PoolState, health_check_interval: Duratio
 
         // 确定一次批处理的最大连接数
         // 每批最多处理25%的连接，但不少于1个，不多于10个
-        let batch_size = (available / 4).max(1).min(10);
+        let batch_size = (available / 4).clamp(1, 10);
         let idle_timeout = pool_state.common_config.idle_timeout;
 
         // 分批处理
@@ -593,10 +593,9 @@ async fn health_check_task(pool_state: PoolState, health_check_interval: Duratio
 /// 检查TCP连接是否健康
 async fn is_connection_healthy(stream: &mut TcpStream) -> bool {
     // 先检查基本可读写状态
-    if !stream
+    if stream
         .ready(tokio::io::Interest::READABLE | tokio::io::Interest::WRITABLE)
-        .await
-        .is_ok()
+        .await.is_err()
     {
         return false;
     }
