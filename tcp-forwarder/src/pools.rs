@@ -428,7 +428,7 @@ async fn dynamic_filler_task(
         let min_needed = dynamic_config.min_size.saturating_sub(current_total);
 
         // 检查可用连接是否不足
-        let available_threshold = (current_total / 4).max(2); // 至少保持25%或2个可用连接
+        let available_threshold = (current_total * dynamic_config.available_ratio).max(5); // 至少保持5个可用连接
         let availability_needed = available_threshold.saturating_sub(current_available);
 
         let needed = min_needed.max(availability_needed);
