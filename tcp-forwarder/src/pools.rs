@@ -487,56 +487,158 @@ async fn dynamic_filler_task(
     info!("动态填充任务停止，IP: {}", ip);
 }
 
-/// 连接池健康检查任务
+/// 连接池健康检查任务 - 分批处理版本
 async fn health_check_task(pool_state: PoolState, health_check_interval: Duration) {
     let mut interval = interval(health_check_interval);
 
     while pool_state.is_active().await {
         interval.tick().await;
 
-        let mut receiver = pool_state.receiver.lock().await;
-        let mut valid_connections = Vec::new();
+        // 计算当前可用连接总数
+        let available = pool_state
+            .stats
+            .available_connections
+            .load(Ordering::Relaxed);
+        let _total = pool_state.stats.total_connections.load(Ordering::Relaxed);
+
+        if available == 0 {
+            // 没有连接需要检查
+            continue;
+        }
+
+        // 确定一次批处理的最大连接数
+        // 每批最多处理25%的连接，但不少于1个，不多于10个
+        let batch_size = (available / 4).max(1).min(10);
         let idle_timeout = pool_state.common_config.idle_timeout;
 
-        // 取出所有连接进行检查
-        while let Ok(mut connection) = receiver.try_recv() {
-            if !connection.is_expired(idle_timeout) {
-                // 检查连接是否还有效（简单的可读性检查）
+        // 分批处理
+        let mut processed_count = 0;
+
+        while processed_count < available && pool_state.is_active().await {
+            // 获取互斥锁，但只持有很短时间
+            let mut receiver = pool_state.receiver.lock().await;
+            let mut valid_connections = Vec::with_capacity(batch_size);
+            let mut batch_processed = 0;
+
+            // 只取出当前批次数量的连接
+            while batch_processed < batch_size {
+                match receiver.try_recv() {
+                    Ok(connection) => {
+                        batch_processed += 1;
+                        processed_count += 1;
+
+                        if !connection.is_expired(idle_timeout) {
+                            // 暂存连接，稍后检查健康状态
+                            valid_connections.push(connection);
+                        } else {
+                            // 移除过期连接
+                            debug!("从连接池中移除过期连接");
+                            pool_state.stats.record_connection_closed();
+                            METRICS.record_pool_health_check(false);
+                            METRICS.record_pool_connection_closed();
+                        }
+                    }
+                    Err(_) => {
+                        // 没有更多连接可处理
+                        break;
+                    }
+                }
+            }
+
+            // 释放锁，以便其他操作可以访问池
+            drop(receiver);
+
+            // 现在检查连接健康状态（在锁外执行以减少锁定时间）
+            let mut healthy_connections = Vec::new();
+
+            for mut connection in valid_connections {
                 if is_connection_healthy(&mut connection.stream).await {
                     connection.touch();
-                    valid_connections.push(connection);
+                    healthy_connections.push(connection);
                     METRICS.record_pool_health_check(true);
                 } else {
                     debug!("从连接池中移除无效连接");
+                    pool_state.stats.record_connection_closed();
                     METRICS.record_pool_health_check(false);
                     METRICS.record_pool_connection_closed();
                 }
-            } else {
-                debug!("从连接池中移除过期连接");
-                METRICS.record_pool_health_check(false);
-                METRICS.record_pool_connection_closed();
             }
-        }
 
-        // 将有效连接放回池中
-        for connection in valid_connections {
-            if pool_state.sender.try_send(connection).is_err() {
-                // 如果放不回去说明池已满，这是正常情况
+            // 将健康的连接放回池中
+            for connection in healthy_connections {
+                // 如果无法返回，说明池已满，跳过后续连接
+                if pool_state.sender.try_send(connection).is_err() {
+                    debug!("连接池已满，停止返回健康连接");
+                    break;
+                }
+            }
+
+            // 如果池已不再活跃，提前退出
+            if !pool_state.is_active().await {
                 break;
             }
+
+            // 在批次之间短暂暂停，避免占用过多CPU
+            if processed_count < available {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
 
-        drop(receiver);
+        debug!("健康检查完成，处理了 {} 个连接", processed_count);
     }
+
+    info!("健康检查任务停止");
 }
 
 /// 检查TCP连接是否健康
 async fn is_connection_healthy(stream: &mut TcpStream) -> bool {
-    // 使用非阻塞方式检查连接状态
-    stream
+    // 先检查基本可读写状态
+    if !stream
         .ready(tokio::io::Interest::READABLE | tokio::io::Interest::WRITABLE)
         .await
         .is_ok()
+    {
+        return false;
+    }
+
+    // 进行进一步的连接验证
+    match ping_connection(stream).await {
+        Ok(_) => true,
+        Err(e) => {
+            debug!("连接健康检查失败: {}", e);
+            false
+        }
+    }
+}
+
+/// 向连接发送探测请求并验证连接是否健康
+async fn ping_connection(stream: &mut TcpStream) -> anyhow::Result<()> {
+    // 设置较短的超时时间，避免长时间阻塞
+    let timeout = Duration::from_millis(300);
+
+    // 移除尝试克隆底层流的代码，直接使用 peek
+    // 使用peek操作检查连接状态（不实际读取数据）
+    let mut buf = [0u8; 1];
+    let peek_result = tokio::time::timeout(timeout, stream.peek(&mut buf)).await;
+
+    match peek_result {
+        Ok(Ok(0)) => {
+            // 连接已关闭（EOF）
+            Err(anyhow::anyhow!("连接已关闭"))
+        }
+        Ok(Ok(_)) => {
+            // 有数据可读，连接正常
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            // 读取出错
+            Err(anyhow::anyhow!("连接读取错误: {}", e))
+        }
+        Err(_) => {
+            // 操作超时
+            Err(anyhow::anyhow!("连接健康检查超时"))
+        }
+    }
 }
 
 /// 连接池填充任务，负责维护池中的连接数量
