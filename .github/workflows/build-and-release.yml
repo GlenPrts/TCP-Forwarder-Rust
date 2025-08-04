@@ -7,9 +7,9 @@
 name: Build and Release
 
 on:
-  push:
-    branches: [ main, develop ]
-    tags: [ 'v*' ]
+  # push:
+  #   branches: [ main, develop ]
+  #   tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
