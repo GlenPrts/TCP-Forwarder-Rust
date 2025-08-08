@@ -595,7 +595,8 @@ async fn is_connection_healthy(stream: &mut TcpStream) -> bool {
     // 先检查基本可读写状态
     if stream
         .ready(tokio::io::Interest::READABLE | tokio::io::Interest::WRITABLE)
-        .await.is_err()
+        .await
+        .is_err()
     {
         return false;
     }
