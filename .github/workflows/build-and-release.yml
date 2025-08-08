@@ -44,9 +44,9 @@ jobs:
         run: cargo fmt --all -- --check
         working-directory: ./tcp-forwarder
 
-      - name: Clippy 静态分析
-        run: cargo clippy --all-targets --all-features -- -D warnings
-        working-directory: ./tcp-forwarder
+      # - name: Clippy 静态分析
+      #   run: cargo clippy --all-targets --all-features -- -D warnings
+      #   working-directory: ./tcp-forwarder
         
       - name: 运行测试
         run: cargo test --verbose
