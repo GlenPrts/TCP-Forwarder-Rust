@@ -1,0 +1,26 @@
+[package]
+name = "tcp-forwarder"
+version = "0.1.0"
+edition = "2021"
+authors = ["GlenPrts <you@example.com>"]
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features=["env-filter", "fmt", "json"] }
+serde = { version = "1", features=["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+tokio = { version = "1", features=["full"] }
+parking_lot = "0.12"
+rand = "0.8"
+ dashmap = "5"
+async-trait = "0.1"
+config = "0.14"
+chrono = { version = "0.4", features=["serde"] }
+smallvec = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"
