@@ -915,11 +915,11 @@ pub async fn pool_manager_task(
 
         // 检查是否有IP不再活跃，需要清理连接池
         for ip in &last_known_ips {
-            if !current_ips.contains(ip) {
-                if let Some((_, pool_state)) = pool_manager.remove(ip) {
-                    info!("IP {} 不再活跃，停止其连接池", ip);
-                    pool_state.mark_inactive().await;
-                }
+            if !current_ips.contains(ip)
+                && let Some((_, pool_state)) = pool_manager.remove(ip)
+            {
+                info!("IP {} 不再活跃，停止其连接池", ip);
+                pool_state.mark_inactive().await;
             }
         }
 
