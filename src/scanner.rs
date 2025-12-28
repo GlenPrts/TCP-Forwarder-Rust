@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 const TIMEOUT_SECS: u64 = 1;
 const MIN_CONCURRENCY: usize = 10;
@@ -19,71 +19,82 @@ const PROBE_COUNT: usize = 5; // Number of probes per IP to calculate jitter/los
 pub async fn start_scan_task(config: Arc<AppConfig>, ip_manager: IpManager) {
     info!("Starting IP scanner task...");
     
-    let mut cidrs = config.cidr_list.clone();
     let mut concurrency = 50;
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENCY));
 
     loop {
-        match fetch_asn_cidrs(&config.asn_url).await {
-            Ok(new_cidrs) => {
-                if !new_cidrs.is_empty() {
-                    info!("Updated CIDR list with {} subnets from ASN", new_cidrs.len());
-                    cidrs = new_cidrs;
-                }
-            }
-            Err(e) => {
-                warn!("Failed to fetch ASN CIDRs, using cached list: {}", e);
-            }
-        }
-
-        info!("Starting new scan round with concurrency: {}", concurrency);
-        let generator = IpGenerator::new(cidrs.clone(), 24, 2);
-        let ips = generator.generate();
-        info!("Generated {} IPs to scan", ips.len());
-
-        let mut tasks = Vec::new();
-        let mut success_count = 0;
-        let mut total_scanned = 0;
-
-        for ip in ips {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let ip_manager = ip_manager.clone();
-            let config = config.clone();
-            
-            tasks.push(tokio::spawn(async move {
-                let result = test_ip(ip, &config.trace_url).await;
-                drop(permit);
-                if let Some(quality) = result {
-                    ip_manager.update_ip(quality);
-                    return true;
-                }
-                false
-            }));
-        }
-
-        for task in tasks {
-            if let Ok(success) = task.await {
-                total_scanned += 1;
-                if success {
-                    success_count += 1;
-                }
-            }
-        }
-
-        if total_scanned > 0 {
-            let success_rate = success_count as f64 / total_scanned as f64;
-            info!("Round stats: {}/{} success (rate: {:.2}%)", success_count, total_scanned, success_rate * 100.0);
-
-            if success_rate > 0.1 {
-                concurrency = (concurrency + 10).min(MAX_CONCURRENCY);
-            } else if success_rate < 0.01 {
-                concurrency = (concurrency - 10).max(MIN_CONCURRENCY);
-            }
-        }
-
+        concurrency = run_scan_once(config.clone(), ip_manager.clone(), concurrency, semaphore.clone()).await;
         info!("Scan round completed. Waiting before next round...");
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(5 * 60 * 60)).await;
     }
+}
+
+pub async fn run_scan_once(
+    config: Arc<AppConfig>,
+    ip_manager: IpManager,
+    mut concurrency: usize,
+    semaphore: Arc<Semaphore>
+) -> usize {
+    let mut cidrs = config.cidr_list.clone();
+    
+    match fetch_asn_cidrs(&config.asn_url).await {
+        Ok(new_cidrs) => {
+            if !new_cidrs.is_empty() {
+                info!("Updated CIDR list with {} subnets from ASN", new_cidrs.len());
+                cidrs = new_cidrs;
+            }
+        }
+        Err(e) => {
+            warn!("Failed to fetch ASN CIDRs, using cached list: {}", e);
+        }
+    }
+
+    info!("Starting new scan round with concurrency: {}", concurrency);
+    let generator = IpGenerator::new(cidrs.clone(), 24, 2);
+    let ips = generator.generate();
+    info!("Generated {} IPs to scan", ips.len());
+
+    let mut tasks = Vec::new();
+    let mut success_count = 0;
+    let mut total_scanned = 0;
+
+    for ip in ips {
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let ip_manager = ip_manager.clone();
+        let config = config.clone();
+        
+        tasks.push(tokio::spawn(async move {
+            let result = test_ip(ip, &config.trace_url).await;
+            drop(permit);
+            if let Some(quality) = result {
+                ip_manager.update_ip(quality);
+                return true;
+            }
+            false
+        }));
+    }
+
+    for task in tasks {
+        if let Ok(success) = task.await {
+            total_scanned += 1;
+            if success {
+                success_count += 1;
+            }
+        }
+    }
+
+    if total_scanned > 0 {
+        let success_rate = success_count as f64 / total_scanned as f64;
+        info!("Round stats: {}/{} success (rate: {:.2}%)", success_count, total_scanned, success_rate * 100.0);
+
+        if success_rate > 0.1 {
+            concurrency = (concurrency + 10).min(MAX_CONCURRENCY);
+        } else if success_rate < 0.01 {
+            concurrency = (concurrency - 10).max(MIN_CONCURRENCY);
+        }
+    }
+    
+    concurrency
 }
 
 async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {

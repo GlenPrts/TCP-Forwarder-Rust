@@ -5,6 +5,7 @@ use rand::prelude::*;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use tracing::info;
+use anyhow::Result;
 
 #[derive(Clone)]
 pub struct IpManager {
@@ -95,8 +96,94 @@ impl IpManager {
         Some(candidates[index].ip)
     }
 
+    pub fn get_best_ips(&self, target_colos: &[String], count: usize) -> Vec<IpAddr> {
+        // Try to get from cache first
+        {
+            let cache = self.best_ips_cache.read().unwrap();
+            if !cache.is_empty() {
+                // If we have cached IPs, filter them by colo if needed
+                let candidates: Vec<IpAddr> = if target_colos.is_empty() {
+                    cache.clone()
+                } else {
+                    cache.iter()
+                        .filter(|&ip| {
+                            if let Some(entry) = self.ips.get(ip) {
+                                target_colos.contains(&entry.value().colo)
+                            } else {
+                                false
+                            }
+                        })
+                        .cloned()
+                        .collect()
+                };
+
+                if !candidates.is_empty() {
+                    let actual_count = std::cmp::min(count, candidates.len());
+                    return candidates.into_iter().take(actual_count).collect();
+                }
+            }
+        }
+
+        // Fallback to full scan if cache is empty or no matching colo found
+        self.recalculate_best_ips_multiple(target_colos, count)
+    }
+
+    fn recalculate_best_ips_multiple(&self, target_colos: &[String], count: usize) -> Vec<IpAddr> {
+        let mut candidates: Vec<IpQuality> = self
+            .ips
+            .iter()
+            .filter(|entry| {
+                if target_colos.is_empty() {
+                    true
+                } else {
+                    target_colos.contains(&entry.value().colo)
+                }
+            })
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        let actual_count = std::cmp::min(count, candidates.len());
+        candidates.into_iter().take(actual_count).map(|q| q.ip).collect()
+    }
+
     pub fn get_all_ips(&self) -> Vec<IpQuality> {
         self.ips.iter().map(|entry| entry.value().clone()).collect()
+    }
+
+    pub fn save_to_file(&self, path: &str) -> Result<()> {
+        let ips: Vec<IpQuality> = self.get_all_ips();
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(writer, &ips)?;
+        Ok(())
+    }
+
+    pub fn load_from_file(&self, path: &str) -> Result<()> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let ips: Vec<IpQuality> = serde_json::from_reader(reader)?;
+        
+        self.ips.clear();
+        for ip in ips {
+            self.ips.insert(ip.ip, ip);
+        }
+        
+        // Refresh cache immediately
+        let mut all_ips: Vec<IpQuality> = self.ips.iter().map(|e| e.value().clone()).collect();
+        all_ips.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        let top_ips: Vec<IpAddr> = all_ips.iter().take(100).map(|q| q.ip).collect();
+        {
+            let mut w = self.best_ips_cache.write().unwrap();
+            *w = top_ips;
+        }
+        
+        Ok(())
     }
 
     pub fn start_cleanup_task(&self) {

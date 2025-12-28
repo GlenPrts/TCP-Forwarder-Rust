@@ -1,17 +1,15 @@
 use crate::config::AppConfig;
-use crate::pool::WarmConnection;
 use crate::state::IpManager;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::Mutex;
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 pub async fn start_server(
     config: Arc<AppConfig>,
-    pool_rx: Arc<Mutex<Receiver<WarmConnection>>>,
     ip_manager: IpManager,
 ) {
     let listener = match TcpListener::bind(config.bind_addr).await {
@@ -28,12 +26,11 @@ pub async fn start_server(
         match listener.accept().await {
             Ok((client_stream, client_addr)) => {
                 debug!("Accepted connection from {}", client_addr);
-                let pool_rx = pool_rx.clone();
                 let config = config.clone();
                 let ip_manager = ip_manager.clone();
 
                 tokio::spawn(async move {
-                    handle_connection(client_stream, client_addr, pool_rx, config, ip_manager)
+                    handle_connection(client_stream, client_addr, config, ip_manager)
                         .await;
                 });
             }
@@ -47,88 +44,85 @@ pub async fn start_server(
 async fn handle_connection(
     mut client_stream: TcpStream,
     client_addr: SocketAddr,
-    pool_rx: Arc<Mutex<Receiver<WarmConnection>>>,
     config: Arc<AppConfig>,
     ip_manager: IpManager,
 ) {
-    // Try to get a warm connection
-    let mut warm_conn = None;
+    // Get multiple candidate IPs for concurrent connection
+    let candidate_ips = ip_manager.get_best_ips(&config.target_colos, 5); // Get top 5 IPs
     
-    // Loop to find a valid warm connection
-    loop {
-        let maybe_conn = {
-            let mut rx = pool_rx.lock().await;
-            rx.try_recv().ok()
-        };
+    if candidate_ips.is_empty() {
+        error!("No available IPs for concurrent connection");
+        return;
+    }
 
-        match maybe_conn {
-            Some(conn) => {
-                // Check if connection is still alive using peek
-                let mut buf = [0u8; 1];
-                match conn.stream.peek(&mut buf).await {
-                    Ok(0) => {
-                        // Connection closed by peer
-                        debug!("Warm connection to {} is dead (peek 0), discarding", conn.peer_ip);
-                        continue;
+    info!("Trying concurrent connections to {} candidates for client {}", candidate_ips.len(), client_addr);
+
+    // Create concurrent connection tasks
+    let mut connection_tasks = Vec::new();
+    
+    for ip in candidate_ips {
+        let target_addr = SocketAddr::new(ip, config.target_port);
+        let task = tokio::spawn(async move {
+            let connect_result = timeout(Duration::from_millis(500), TcpStream::connect(target_addr)).await;
+            
+            match connect_result {
+                Ok(Ok(stream)) => {
+                    // Optimize socket
+                    if let Err(e) = stream.set_nodelay(true) {
+                        warn!("Failed to set nodelay on connection to {}: {}", ip, e);
                     }
-                    Ok(_) => {
-                        // Connection seems alive (has data or just open)
-                        // Note: peek returning > 0 means there is data, which is unexpected for a fresh connection 
-                        // unless server sent banner. But for Cloudflare CDN, usually client speaks first.
-                        // If peek blocks, it means no data yet, but we are using async peek which might return immediately if data is there?
-                        // Wait, TcpStream::peek is async. If no data is available, it waits?
-                        // Actually, we want non-blocking check or just assume it's alive if no error.
-                        // But standard peek waits for data.
-                        // A better check for "is closed" without blocking is tricky in pure async Rust without polling.
-                        // However, for a warm pool, we just established it. 
-                        // If it was closed, peek might return 0 immediately.
-                        // If it's open and idle, peek will block. We don't want to block.
-                        // So we can use `try_read` or similar? No, `try_read` reads data.
-                        // Let's skip complex peek for now and rely on the fact that we just created it recently
-                        // and we have Keepalive.
-                        // BUT, the user asked for Peek detection.
-                        // To do non-blocking peek: set non-blocking, peek, handle WouldBlock.
-                        // But tokio stream is already non-blocking.
-                        // If we call `peek`, it awaits data. We can wrap it in a timeout(0).
-                        
-                        match tokio::time::timeout(std::time::Duration::from_micros(1), conn.stream.peek(&mut buf)).await {
-                            Ok(Ok(0)) => {
-                                debug!("Warm connection to {} is dead (peek 0), discarding", conn.peer_ip);
-                                continue;
-                            }
-                            Ok(Err(_)) => {
-                                // Error peeking, discard
-                                debug!("Warm connection to {} error peeking, discarding", conn.peer_ip);
-                                continue;
-                            }
-                            _ => {
-                                // Timeout (no data yet) or Data present -> Assume alive
-                                warm_conn = Some(conn);
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => {
-                         debug!("Warm connection to {} error peeking, discarding", conn.peer_ip);
-                         continue;
-                    }
+                    
+                    // Connection successful
+                    Some((stream, ip, std::time::Instant::now()))
                 }
+                _ => None,
             }
-            None => break, // Pool empty
+        });
+        connection_tasks.push(task);
+    }
+
+    // Wait for the first successful connection
+    let mut fastest_connection: Option<(TcpStream, std::net::IpAddr, std::time::Instant)> = None;
+    
+    // Use a short timeout to find the fastest connection
+    let timeout_duration = Duration::from_millis(800);
+    let start_time = std::time::Instant::now();
+    
+    while start_time.elapsed() < timeout_duration && !connection_tasks.is_empty() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        
+        let (done, pending): (Vec<_>, Vec<_>) = connection_tasks.into_iter().partition(|t| t.is_finished());
+        connection_tasks = pending;
+        
+        // Check if any task has a successful result
+        for task in done {
+            if let Ok(Some(connection)) = task.await {
+                fastest_connection = Some(connection);
+                break;
+            }
+        }
+        
+        if fastest_connection.is_some() {
+            break;
         }
     }
 
-    let mut remote_stream = match warm_conn {
-        Some(conn) => {
-            debug!(
-                "Using warm connection to {} for client {}",
-                conn.peer_ip, client_addr
-            );
-            conn.stream
+    // Abort remaining connection tasks
+    for task in &connection_tasks {
+        task.abort();
+    }
+
+    let mut remote_stream = match fastest_connection {
+        Some((stream, ip, connect_time)) => {
+            let connection_time = connect_time.elapsed();
+            info!("Using fastest connection to {} for client {} (established in {:?})", 
+                  ip, client_addr, connection_time);
+            stream
         }
         None => {
-            warn!("Warm pool empty or all dead, falling back to direct connection for {}", client_addr);
-            // Fallback: Connect directly
+            warn!("All concurrent connections failed for {}, falling back to single connection attempt", client_addr);
+            
+            // Fallback: try single connection with longer timeout
             let target_ip = match ip_manager.get_best_ip(&config.target_colos) {
                 Some(ip) => ip,
                 None => {
@@ -137,15 +131,19 @@ async fn handle_connection(
                 }
             };
             let target_addr = SocketAddr::new(target_ip, config.target_port);
-            match TcpStream::connect(target_addr).await {
-                Ok(stream) => {
+            match timeout(Duration::from_secs(3), TcpStream::connect(target_addr)).await {
+                Ok(Ok(stream)) => {
                     if let Err(e) = stream.set_nodelay(true) {
                         warn!("Failed to set nodelay on fallback connection: {}", e);
                     }
                     stream
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("Failed to establish fallback connection to {}: {}", target_addr, e);
+                    return;
+                }
+                Err(e) => {
+                    error!("Timeout connecting to {}: {}", target_addr, e);
                     return;
                 }
             }
@@ -155,7 +153,7 @@ async fn handle_connection(
     // Bidirectional copy
     match copy_bidirectional(&mut client_stream, &mut remote_stream).await {
         Ok((bytes_tx, bytes_rx)) => {
-            debug!(
+            info!(
                 "Connection closed: {} -> {} (TX: {} bytes, RX: {} bytes)",
                 client_addr,
                 remote_stream.peer_addr().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),

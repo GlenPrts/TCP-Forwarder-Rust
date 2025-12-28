@@ -12,9 +12,9 @@ pub struct AppConfig {
     pub cidr_list: Vec<IpNet>,
     pub bind_addr: SocketAddr,
     pub web_addr: SocketAddr,
-    pub max_warm_connections: usize,
     pub trace_url: String,
     pub asn_url: String,
+    pub ip_store_file: String,
 }
 
 impl Default for AppConfig {
@@ -28,9 +28,9 @@ impl Default for AppConfig {
             ],
             bind_addr: "0.0.0.0:8080".parse().unwrap(),
             web_addr: "0.0.0.0:3000".parse().unwrap(),
-            max_warm_connections: 100,
             trace_url: "http://engage.cloudflareclient.com/cdn-cgi/trace".to_string(),
             asn_url: "https://asn.0x01111110.com/13335?4".to_string(),
+            ip_store_file: "ip_results.json".to_string(),
         }
     }
 }
