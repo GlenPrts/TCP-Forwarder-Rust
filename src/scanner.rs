@@ -11,11 +11,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
-const TRACE_URL: &str = "http://engage.cloudflareclient.com/cdn-cgi/trace";
 const TIMEOUT_SECS: u64 = 1;
 const MIN_CONCURRENCY: usize = 10;
 const MAX_CONCURRENCY: usize = 200;
-const ASN_URL: &str = "https://asn.0x01111110.com/13335?4";
 const PROBE_COUNT: usize = 5; // Number of probes per IP to calculate jitter/loss
 
 pub async fn start_scan_task(config: Arc<AppConfig>, ip_manager: IpManager) {
@@ -26,7 +24,7 @@ pub async fn start_scan_task(config: Arc<AppConfig>, ip_manager: IpManager) {
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENCY));
 
     loop {
-        match fetch_asn_cidrs().await {
+        match fetch_asn_cidrs(&config.asn_url).await {
             Ok(new_cidrs) => {
                 if !new_cidrs.is_empty() {
                     info!("Updated CIDR list with {} subnets from ASN", new_cidrs.len());
@@ -50,9 +48,10 @@ pub async fn start_scan_task(config: Arc<AppConfig>, ip_manager: IpManager) {
         for ip in ips {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let ip_manager = ip_manager.clone();
+            let config = config.clone();
             
             tasks.push(tokio::spawn(async move {
-                let result = test_ip(ip).await;
+                let result = test_ip(ip, &config.trace_url).await;
                 drop(permit);
                 if let Some(quality) = result {
                     ip_manager.update_ip(quality);
@@ -87,12 +86,12 @@ pub async fn start_scan_task(config: Arc<AppConfig>, ip_manager: IpManager) {
     }
 }
 
-async fn fetch_asn_cidrs() -> Result<Vec<IpNet>> {
+async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
     
-    let response = client.get(ASN_URL).send().await?.text().await?;
+    let response = client.get(url).send().await?.text().await?;
     let mut cidrs = Vec::new();
     
     for line in response.lines() {
@@ -107,9 +106,14 @@ async fn fetch_asn_cidrs() -> Result<Vec<IpNet>> {
     Ok(cidrs)
 }
 
-async fn test_ip(ip: IpAddr) -> Option<IpQuality> {
+async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
+    // Extract hostname from trace_url to resolve
+    let url = reqwest::Url::parse(trace_url).ok()?;
+    let host = url.host_str()?;
+    let port = url.port_or_known_default().unwrap_or(80);
+
     let client = Client::builder()
-        .resolve("engage.cloudflareclient.com", std::net::SocketAddr::new(ip, 80))
+        .resolve(host, std::net::SocketAddr::new(ip, port))
         .timeout(Duration::from_secs(TIMEOUT_SECS))
         .build()
         .ok()?;
@@ -120,7 +124,7 @@ async fn test_ip(ip: IpAddr) -> Option<IpQuality> {
 
     for _ in 0..PROBE_COUNT {
         let start = Instant::now();
-        match client.get(TRACE_URL).send().await {
+        match client.get(trace_url).send().await {
             Ok(response) => {
                 let latency = start.elapsed().as_millis();
                 if response.status().is_success() {

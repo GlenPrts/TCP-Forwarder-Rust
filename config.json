@@ -1,0 +1,16 @@
+{
+  "target_port": 443,
+  "target_colos": [
+    "SJC",
+    "LAX"
+  ],
+  "cidr_list": [
+    "104.16.0.0/12",
+    "172.64.0.0/13"
+  ],
+  "bind_addr": "0.0.0.0:8080",
+  "web_addr": "0.0.0.0:3000",
+  "max_warm_connections": 100,
+  "trace_url": "http://engage.cloudflareclient.com/cdn-cgi/trace",
+  "asn_url": "https://asn.0x01111110.com/13335?4"
+}

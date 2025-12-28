@@ -23,8 +23,17 @@ async fn main() {
 
     info!("Starting TCP Forwarder...");
 
-    // Load configuration (using default for now)
-    let config = Arc::new(AppConfig::default());
+    // Load configuration
+    let config = match AppConfig::load_from_file("config.json") {
+        Ok(cfg) => {
+            info!("Loaded configuration from config.json");
+            Arc::new(cfg)
+        }
+        Err(e) => {
+            info!("Failed to load config.json: {}, using default configuration", e);
+            Arc::new(AppConfig::default())
+        }
+    };
     info!("Loaded configuration: {:?}", config);
 
     // Initialize IP Manager
@@ -59,8 +68,9 @@ async fn main() {
 
     // Start Web Server
     let web_manager = ip_manager.clone();
+    let web_config = config.clone();
     tokio::spawn(async move {
-        start_web_server(web_manager).await;
+        start_web_server(web_config, web_manager).await;
     });
     
     // Keep main thread alive

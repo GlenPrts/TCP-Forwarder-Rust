@@ -1,18 +1,18 @@
+use crate::config::AppConfig;
 use crate::model::IpQuality;
 use crate::state::IpManager;
 use axum::{extract::State, routing::get, Json, Router};
-use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::info;
 
-pub async fn start_web_server(ip_manager: IpManager) {
+pub async fn start_web_server(config: Arc<AppConfig>, ip_manager: IpManager) {
     let app = Router::new()
         .route("/status", get(get_status))
         .with_state(ip_manager);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    info!("Web server listening on {}", addr);
+    info!("Web server listening on {}", config.web_addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(config.web_addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
