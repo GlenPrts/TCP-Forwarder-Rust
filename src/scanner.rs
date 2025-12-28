@@ -16,19 +16,6 @@ const MIN_CONCURRENCY: usize = 10;
 const MAX_CONCURRENCY: usize = 200;
 const PROBE_COUNT: usize = 5; // Number of probes per IP to calculate jitter/loss
 
-pub async fn start_scan_task(config: Arc<AppConfig>, ip_manager: IpManager) {
-    info!("Starting IP scanner task...");
-    
-    let mut concurrency = 50;
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENCY));
-
-    loop {
-        concurrency = run_scan_once(config.clone(), ip_manager.clone(), concurrency, semaphore.clone()).await;
-        info!("Scan round completed. Waiting before next round...");
-        tokio::time::sleep(Duration::from_secs(5 * 60 * 60)).await;
-    }
-}
-
 pub async fn run_scan_once(
     config: Arc<AppConfig>,
     ip_manager: IpManager,

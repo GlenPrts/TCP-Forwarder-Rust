@@ -1,10 +1,8 @@
 use crate::model::IpQuality;
-use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use rand::prelude::*;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
-use tracing::info;
 use anyhow::Result;
 
 #[derive(Clone)]
@@ -184,51 +182,5 @@ impl IpManager {
         }
         
         Ok(())
-    }
-
-    pub fn start_cleanup_task(&self) {
-        let ips = self.ips.clone();
-        let cache = self.best_ips_cache.clone();
-        
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5)); // Refresh cache every 5s
-            let mut cleanup_tick = 0;
-
-            loop {
-                interval.tick().await;
-                
-                // 1. Refresh Cache
-                // We take all IPs, sort them, and keep top 100
-                let mut all_ips: Vec<IpQuality> = ips.iter().map(|e| e.value().clone()).collect();
-                all_ips.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-                
-                let top_ips: Vec<IpAddr> = all_ips.iter().take(100).map(|q| q.ip).collect();
-                
-                {
-                    let mut w = cache.write().unwrap();
-                    *w = top_ips;
-                }
-
-                // 2. Cleanup Stale IPs (every 12 ticks = 60s)
-                cleanup_tick += 1;
-                if cleanup_tick >= 12 {
-                    cleanup_tick = 0;
-                    let now = Utc::now();
-                    let threshold = now - Duration::minutes(10);
-
-                    let mut to_remove = Vec::new();
-                    for entry in ips.iter() {
-                        if entry.value().last_updated < threshold {
-                            to_remove.push(*entry.key());
-                        }
-                    }
-
-                    for ip in to_remove {
-                        ips.remove(&ip);
-                        info!("Removed stale IP: {}", ip);
-                    }
-                }
-            }
-        });
     }
 }
