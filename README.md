@@ -87,6 +87,18 @@ cargo run
 ./target/release/tcp-forwarder-rust
 ```
 
+#### 其他工具命令
+
+查看数据中心质量排名（基于已有的扫描结果）：
+
+```bash
+cargo run -- --rank-colos
+# 或
+./target/release/tcp-forwarder-rust --rank-colos
+```
+
+此命令将按平均评分降序输出各数据中心的统计信息，帮助您决定 `config.json` 中 `target_colos` 的设置。
+
 ### 4. 构建生产版本
 
 为了获得最佳性能，建议使用 release 模式构建：

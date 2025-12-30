@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, Mutex};
 use tracing::{debug, info, warn};
 
-const TIMEOUT_SECS: u64 = 1;
+const TIMEOUT_SECS: u64 = 2;
 const MIN_CONCURRENCY: usize = 10;
 const MAX_CONCURRENCY: usize = 200;
 const PROBE_COUNT: usize = 5; // Number of probes per IP
@@ -124,13 +124,40 @@ pub async fn run_scan_once(
 
 async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
     let client = Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
         .build()?;
     
-    let response = client.get(url).send().await?.text().await?;
+    let mut attempts = 0;
+    
+    let response_text = loop {
+        attempts += 1;
+        match client.get(url).send().await {
+            Ok(resp) => {
+                match resp.text().await {
+                    Ok(text) => {
+                        break text;
+                    }
+                    Err(e) => {
+                        if attempts >= 3 {
+                            return Err(e.into());
+                        }
+                        warn!("Failed to read ASN response (attempt {}/3): {}", attempts, e);
+                    }
+                }
+            }
+            Err(e) => {
+                if attempts >= 3 {
+                    return Err(e.into());
+                }
+                warn!("Failed to fetch ASN data (attempt {}/3): {}", attempts, e);
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+
     let mut cidrs = Vec::new();
     
-    for line in response.lines() {
+    for line in response_text.lines() {
         let line = line.trim();
         if !line.is_empty() {
             if let Ok(cidr) = line.parse::<IpNet>() {

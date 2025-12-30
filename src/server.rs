@@ -71,7 +71,7 @@ async fn handle_connection(
     for ip in candidate_ips {
         let target_addr = SocketAddr::new(ip, config.target_port);
         let task = tokio::spawn(async move {
-            let connect_result = timeout(Duration::from_millis(500), TcpStream::connect(target_addr)).await;
+            let connect_result = timeout(Duration::from_millis(1500), TcpStream::connect(target_addr)).await;
             
             match connect_result {
                 Ok(Ok(stream)) => {
@@ -93,7 +93,7 @@ async fn handle_connection(
     let mut fastest_connection: Option<(TcpStream, std::net::IpAddr, std::time::Instant)> = None;
     
     // Use a short timeout to find the fastest connection
-    let timeout_duration = Duration::from_millis(800);
+    let timeout_duration = Duration::from_millis(2000);
     let start_time = std::time::Instant::now();
     
     while start_time.elapsed() < timeout_duration && !connection_tasks.is_empty() {
@@ -141,7 +141,7 @@ async fn handle_connection(
             
             let target_ip = fallback_ips[0];
             let target_addr = SocketAddr::new(target_ip, config.target_port);
-            match timeout(Duration::from_secs(3), TcpStream::connect(target_addr)).await {
+            match timeout(Duration::from_secs(5), TcpStream::connect(target_addr)).await {
                 Ok(Ok(stream)) => {
                     if let Err(e) = stream.set_nodelay(true) {
                         warn!("Failed to set nodelay on fallback connection: {}", e);
