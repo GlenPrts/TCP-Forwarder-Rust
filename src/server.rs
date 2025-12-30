@@ -47,11 +47,19 @@ async fn handle_connection(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
 ) {
-    // Get multiple candidate IPs for concurrent connection
-    let candidate_ips = ip_manager.get_best_ips(&config.target_colos, 5); // Get top 5 IPs
+    // Get multiple candidate IPs for concurrent connection using new strategy
+    let candidate_ips = ip_manager.get_target_ips(
+        &config.target_colos,
+        config.selection_random_n_subnets,
+        config.selection_random_m_ips
+    );
     
     if candidate_ips.is_empty() {
-        error!("No available IPs for concurrent connection");
+        error!("No available IPs for concurrent connection (strategy: top {}% subnets -> {} subnets -> {} IPs)",
+            config.selection_top_k_percent * 100.0,
+            config.selection_random_n_subnets,
+            config.selection_random_m_ips
+        );
         return;
     }
 
@@ -123,13 +131,15 @@ async fn handle_connection(
             warn!("All concurrent connections failed for {}, falling back to single connection attempt", client_addr);
             
             // Fallback: try single connection with longer timeout
-            let target_ip = match ip_manager.get_best_ip(&config.target_colos) {
-                Some(ip) => ip,
-                None => {
-                    error!("No available IPs for fallback connection");
-                    return;
-                }
-            };
+            // Get just 1 IP (n=1, m=1)
+            let fallback_ips = ip_manager.get_target_ips(&config.target_colos, 1, 1);
+            
+            if fallback_ips.is_empty() {
+                 error!("No available IPs for fallback connection");
+                 return;
+            }
+            
+            let target_ip = fallback_ips[0];
             let target_addr = SocketAddr::new(target_ip, config.target_port);
             match timeout(Duration::from_secs(3), TcpStream::connect(target_addr)).await {
                 Ok(Ok(stream)) => {

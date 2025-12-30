@@ -15,6 +15,11 @@ pub struct AppConfig {
     pub trace_url: String,
     pub asn_url: String,
     pub ip_store_file: String,
+    
+    // New selection strategy parameters
+    pub selection_top_k_percent: f64,    // e.g., 0.1 for top 10%
+    pub selection_random_n_subnets: usize, // e.g., 3 subnets
+    pub selection_random_m_ips: usize,     // e.g., 2 IPs per subnet
 }
 
 impl Default for AppConfig {
@@ -30,7 +35,10 @@ impl Default for AppConfig {
             web_addr: "0.0.0.0:3000".parse().unwrap(),
             trace_url: "http://engage.cloudflareclient.com/cdn-cgi/trace".to_string(),
             asn_url: "https://asn.0x01111110.com/13335?4".to_string(),
-            ip_store_file: "ip_results.json".to_string(),
+            ip_store_file: "subnet_results.json".to_string(),
+            selection_top_k_percent: 0.1,
+            selection_random_n_subnets: 3,
+            selection_random_m_ips: 2,
         }
     }
 }

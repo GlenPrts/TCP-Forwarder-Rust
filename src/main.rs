@@ -53,7 +53,7 @@ async fn main() {
     }
 
     // Normal mode: Load IPs from file
-    if let Err(e) = ip_manager.load_from_file(&config.ip_store_file) {
+    if let Err(e) = ip_manager.load_from_file(&config.ip_store_file, config.selection_top_k_percent) {
         warn!("Failed to load IPs from file: {}. Starting with empty list.", e);
     } else {
         info!("Loaded IPs from {}", config.ip_store_file);

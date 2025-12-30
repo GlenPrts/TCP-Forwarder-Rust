@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::model::IpQuality;
+use crate::model::SubnetQuality;
 use crate::state::IpManager;
 use axum::{extract::State, routing::get, Json, Router};
 use std::sync::Arc;
@@ -16,9 +16,9 @@ pub async fn start_web_server(config: Arc<AppConfig>, ip_manager: IpManager) {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn get_status(State(ip_manager): State<IpManager>) -> Json<Vec<IpQuality>> {
-    let mut ips: Vec<IpQuality> = ip_manager.get_all_ips();
+async fn get_status(State(ip_manager): State<IpManager>) -> Json<Vec<SubnetQuality>> {
+    let mut subnets: Vec<SubnetQuality> = ip_manager.get_all_subnets();
     // Sort by score (descending)
-    ips.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    Json(ips)
+    subnets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    Json(subnets)
 }

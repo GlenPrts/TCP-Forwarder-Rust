@@ -12,5 +12,8 @@
   "web_addr": "0.0.0.0:3000",
   "trace_url": "http://engage.cloudflareclient.com/cdn-cgi/trace",
   "asn_url": "https://asn.0x01111110.com/13335?4",
-  "ip_store_file": "ip_results.json"
+  "ip_store_file": "subnet_results.json",
+  "selection_top_k_percent": 0.1,
+  "selection_random_n_subnets": 3,
+  "selection_random_m_ips": 2
 }
