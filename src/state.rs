@@ -95,7 +95,7 @@ impl IpManager {
         };
 
         // For each subnet, generate m IPs
-        let mut target_ips = Vec::new();
+        let mut target_ips = Vec::with_capacity(selected_subnets.len() * m_ips);
         for subnet in selected_subnets {
             for _ in 0..m_ips {
                 target_ips.push(generate_random_ip_in_subnet(&subnet, &mut rng));

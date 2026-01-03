@@ -86,17 +86,27 @@ impl IpQuality {
         // Latency penalty: -1 point per 10ms
         // Jitter penalty: -2 points per 10ms
         // Loss penalty: -100 points per 1% loss (loss is critical)
-        
+
         let mut score = 100.0;
-        
+        let original_score = score;
+
         score -= (self.latency as f32) / 10.0;
         score -= (self.jitter as f32) / 5.0; // Jitter is worse than latency
         score -= self.loss_rate * 100.0 * 100.0; // 1% loss = 0.01 * 10000 = 100 points penalty
 
+        tracing::debug!("IP {} score calculation: base={}, latency_penalty={}, jitter_penalty={}, loss_penalty={}, final={}",
+            self.ip,
+            original_score,
+            (self.latency as f32) / 10.0,
+            (self.jitter as f32) / 5.0,
+            self.loss_rate * 100.0 * 100.0,
+            score
+        );
+
         if score < 0.0 {
             score = 0.0;
         }
-        
+
         self.score = score;
     }
 }

@@ -89,35 +89,29 @@ async fn handle_connection(
         connection_tasks.push(task);
     }
 
-    // Wait for the first successful connection
+    // Wait for the first successful connection using tokio::select!
     let mut fastest_connection: Option<(TcpStream, std::net::IpAddr, std::time::Instant)> = None;
-    
-    // Use a short timeout to find the fastest connection
     let timeout_duration = Duration::from_millis(2000);
-    let start_time = std::time::Instant::now();
-    
-    while start_time.elapsed() < timeout_duration && !connection_tasks.is_empty() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        
-        let (done, pending): (Vec<_>, Vec<_>) = connection_tasks.into_iter().partition(|t| t.is_finished());
-        connection_tasks = pending;
-        
-        // Check if any task has a successful result
-        for task in done {
-            if let Ok(Some(connection)) = task.await {
-                fastest_connection = Some(connection);
-                break;
-            }
-        }
-        
-        if fastest_connection.is_some() {
-            break;
-        }
-    }
 
-    // Abort remaining connection tasks
-    for task in &connection_tasks {
-        task.abort();
+    tokio::select! {
+        _ = tokio::time::sleep(timeout_duration) => {
+            debug!("Connection selection timed out");
+        },
+        result = async {
+            let mut tasks_iter = connection_tasks.into_iter();
+            while let Some(task) = tasks_iter.next() {
+                if let Ok(Some(connection)) = task.await {
+                    // Abort remaining tasks
+                    for remaining_task in tasks_iter {
+                        remaining_task.abort();
+                    }
+                    return Some(connection);
+                }
+            }
+            None
+        } => {
+            fastest_connection = result;
+        }
     }
 
     let mut remote_stream = match fastest_connection {

@@ -57,18 +57,19 @@ pub async fn run_scan_once(
     
     let mut tasks = Vec::new();
     let mut rng = rand::thread_rng();
+    let trace_url = Arc::new(config.trace_url.clone());
 
     for subnet in &target_subnets {
         for _ in 0..SAMPLES_PER_SUBNET {
              let ip = generate_random_ip_in_subnet(subnet, &mut rng);
              let subnet_clone = *subnet;
-             let config_clone = config.clone();
              let semaphore_clone = semaphore.clone();
              let subnet_results_clone = subnet_results.clone();
+             let trace_url_clone = trace_url.clone();
 
              tasks.push(tokio::spawn(async move {
                  let _permit = semaphore_clone.acquire_owned().await.unwrap();
-                 if let Some(quality) = test_ip(ip, &config_clone.trace_url).await {
+                 if let Some(quality) = test_ip(ip, &trace_url_clone).await {
                      let mut results = subnet_results_clone.lock().await;
                      results.entry(subnet_clone).or_insert_with(Vec::new).push(quality);
                      return true;
@@ -178,6 +179,7 @@ async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
     let client = Client::builder()
         .resolve(host, std::net::SocketAddr::new(ip, port))
         .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(1)) // Separate connect timeout
         .build()
         .ok()?;
 

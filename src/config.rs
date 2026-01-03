@@ -47,7 +47,18 @@ impl AppConfig {
     pub fn load_from_file(path: &str) -> Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let config = serde_json::from_reader(reader)?;
+        let config: Self = serde_json::from_reader(reader)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.selection_top_k_percent <= 0.0 || self.selection_top_k_percent > 1.0 {
+            return Err(anyhow::anyhow!("selection_top_k_percent must be between 0 and 1"));
+        }
+        if self.selection_random_n_subnets == 0 || self.selection_random_m_ips == 0 {
+            return Err(anyhow::anyhow!("selection_random_n_subnets and selection_random_m_ips must be greater than 0"));
+        }
+        Ok(())
     }
 }
