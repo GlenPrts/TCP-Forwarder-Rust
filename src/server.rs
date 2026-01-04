@@ -1,11 +1,11 @@
 use crate::config::AppConfig;
 use crate::state::IpManager;
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -155,56 +155,46 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
         return None;
     }
 
-    // 使用 channel 来接收第一个成功的连接
-    let (tx, mut rx) = mpsc::channel::<ConnectionResult>(1);
-
-    // 启动所有连接任务
-    let mut handles = Vec::with_capacity(candidate_ips.len());
+    let mut tasks = FuturesUnordered::new();
 
     for &ip in candidate_ips {
-        let tx = tx.clone();
         let target_addr = SocketAddr::new(ip, target_port);
-
-        let handle = tokio::spawn(async move {
+        tasks.push(async move {
             let start = Instant::now();
             let connect_result =
                 timeout(Duration::from_millis(CONNECT_TIMEOUT_MS), TcpStream::connect(target_addr))
                     .await;
 
-            if let Ok(Ok(stream)) = connect_result {
-                // 优化 socket
-                let _ = stream.set_nodelay(true);
-
-                let result = ConnectionResult {
-                    stream,
-                    ip,
-                    connect_time: start.elapsed(),
-                };
-
-                // 尝试发送结果，如果 channel 已关闭则忽略
-                let _ = tx.send(result).await;
+            match connect_result {
+                Ok(Ok(stream)) => {
+                    // 优化 socket
+                    let _ = stream.set_nodelay(true);
+                    Some(ConnectionResult {
+                        stream,
+                        ip,
+                        connect_time: start.elapsed(),
+                    })
+                }
+                _ => None,
             }
         });
-
-        handles.push(handle);
     }
-
-    // 丢弃发送端，这样当所有任务完成时 rx.recv() 会返回 None
-    drop(tx);
 
     // 等待第一个成功的连接或超时
     let result = tokio::select! {
-        result = rx.recv() => result,
+        result = async {
+            while let Some(res) = tasks.next().await {
+                if let Some(conn) = res {
+                    return Some(conn);
+                }
+            }
+            None
+        } => result,
         _ = tokio::time::sleep(Duration::from_millis(SELECTION_TIMEOUT_MS)) => {
             debug!("Connection selection timed out");
             None
         }
     };
-
-    // 取消所有剩余的连接任务
-    for handle in handles {
-        handle.abort();
-    }
 
     result
 }

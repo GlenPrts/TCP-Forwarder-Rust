@@ -3,6 +3,7 @@ use crate::model::{IpQuality, SubnetQuality};
 use crate::state::IpManager;
 use crate::utils::generate_random_ip_in_subnet;
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use ipnet::IpNet;
 use reqwest::Client;
 use std::collections::HashMap;
@@ -181,19 +182,32 @@ async fn execute_scan_tasks(tasks: Vec<tokio::task::JoinHandle<bool>>) -> (usize
     let mut success_count = 0;
     let mut total_scanned = 0;
 
+    let pb = ProgressBar::new(tasks.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    pb.set_message("Scanning IPs...");
+
     for task in tasks {
         match task.await {
             Ok(success) => {
                 total_scanned += 1;
                 if success {
                     success_count += 1;
+                    pb.set_message(format!("Success: {}", success_count));
                 }
             }
             Err(e) => {
                 debug!("Scan task failed: {}", e);
             }
         }
+        pb.inc(1);
     }
+
+    pb.finish_with_message(format!("Scan complete. Found {} valid IPs.", success_count));
 
     (success_count, total_scanned)
 }
