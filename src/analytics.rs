@@ -1,6 +1,106 @@
+use crate::model::SubnetQuality;
 use crate::state::IpManager;
 use std::collections::HashMap;
 
+/// 数据中心统计信息
+#[derive(Debug, Default)]
+struct ColoStats {
+    total_score: f32,
+    total_latency: u64,
+    total_jitter: u64,
+    total_loss_rate: f32,
+    count: usize,
+}
+
+impl ColoStats {
+    fn add(&mut self, subnet: &SubnetQuality) {
+        self.total_score += subnet.score;
+        self.total_latency += subnet.avg_latency;
+        self.total_jitter += subnet.avg_jitter;
+        self.total_loss_rate += subnet.avg_loss_rate;
+        self.count += 1;
+    }
+
+    fn avg_score(&self) -> f32 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.total_score / self.count as f32
+        }
+    }
+
+    fn avg_latency(&self) -> u64 {
+        if self.count == 0 {
+            0
+        } else {
+            self.total_latency / self.count as u64
+        }
+    }
+
+    fn avg_jitter(&self) -> u64 {
+        if self.count == 0 {
+            0
+        } else {
+            self.total_jitter / self.count as u64
+        }
+    }
+
+    fn avg_loss_rate(&self) -> f32 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.total_loss_rate / self.count as f32
+        }
+    }
+}
+
+/// 数据中心排名条目
+#[derive(Debug)]
+pub struct ColoRankingEntry {
+    pub colo: String,
+    pub avg_score: f32,
+    pub avg_latency: u64,
+    pub avg_jitter: u64,
+    pub avg_loss_rate: f32,
+    pub subnet_count: usize,
+}
+
+/// 获取数据中心排名
+pub fn get_colo_ranking(ip_manager: &IpManager) -> Vec<ColoRankingEntry> {
+    let subnets = ip_manager.get_all_subnets();
+
+    let mut stats_map: HashMap<String, ColoStats> = HashMap::new();
+
+    for subnet in &subnets {
+        stats_map
+            .entry(subnet.colo.clone())
+            .or_default()
+            .add(subnet);
+    }
+
+    let mut ranking: Vec<ColoRankingEntry> = stats_map
+        .into_iter()
+        .map(|(colo, stats)| ColoRankingEntry {
+            colo,
+            avg_score: stats.avg_score(),
+            avg_latency: stats.avg_latency(),
+            avg_jitter: stats.avg_jitter(),
+            avg_loss_rate: stats.avg_loss_rate(),
+            subnet_count: stats.count,
+        })
+        .collect();
+
+    // 按平均评分降序排序
+    ranking.sort_by(|a, b| {
+        b.avg_score
+            .partial_cmp(&a.avg_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    ranking
+}
+
+/// 打印数据中心排名
 pub fn print_colo_ranking(ip_manager: &IpManager) {
     let subnets = ip_manager.get_all_subnets();
     if subnets.is_empty() {
@@ -8,44 +108,64 @@ pub fn print_colo_ranking(ip_manager: &IpManager) {
         return;
     }
 
-    struct ColoStats {
-        total_score: f32,
-        total_latency: u128,
-        count: usize,
+    let ranking = get_colo_ranking(ip_manager);
+
+    // 打印表头
+    println!(
+        "{:<8} | {:>10} | {:>12} | {:>10} | {:>10} | {:>12}",
+        "Colo", "Avg Score", "Avg Latency", "Avg Jitter", "Loss Rate", "Subnet Count"
+    );
+    println!("{}", "-".repeat(75));
+
+    // 打印数据
+    for entry in ranking {
+        println!(
+            "{:<8} | {:>10.2} | {:>10} ms | {:>8} ms | {:>9.2}% | {:>12}",
+            entry.colo,
+            entry.avg_score,
+            entry.avg_latency,
+            entry.avg_jitter,
+            entry.avg_loss_rate * 100.0,
+            entry.subnet_count
+        );
     }
 
-    let mut stats_map: HashMap<String, ColoStats> = HashMap::new();
+    println!();
+    println!("Total subnets: {}", subnets.len());
+}
 
-    for subnet in &subnets {
-        let entry = stats_map.entry(subnet.colo.clone()).or_insert(ColoStats {
-            total_score: 0.0,
-            total_latency: 0,
-            count: 0,
-        });
-        entry.total_score += subnet.score;
-        entry.total_latency += subnet.avg_latency;
-        entry.count += 1;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::SubnetQuality;
+    use chrono::Utc;
+    use ipnet::IpNet;
+
+    fn create_test_subnet(colo: &str, score: f32, latency: u64) -> SubnetQuality {
+        SubnetQuality {
+            subnet: "1.2.3.0/24".parse::<IpNet>().unwrap(),
+            score,
+            avg_latency: latency,
+            avg_jitter: 10,
+            avg_loss_rate: 0.0,
+            sample_count: 1,
+            colo: colo.to_string(),
+            last_updated: Utc::now(),
+        }
     }
 
-    let mut ranking: Vec<(String, f32, u128, usize)> = stats_map
-        .into_iter()
-        .map(|(colo, stats)| {
-            (
-                colo,
-                stats.total_score / stats.count as f32,
-                if stats.count > 0 { stats.total_latency / stats.count as u128 } else { 0 },
-                stats.count,
-            )
-        })
-        .collect();
-
-    // Sort by average score descending
-    ranking.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    println!("{:<10} | {:<10} | {:<10} | {:<10}", "Colo", "Avg Score", "Avg Latency", "Subnet Count");
-    println!("{:-<10}-|-{:-<10}-|-{:-<10}-|-{:-<10}", "", "", "", "");
-
-    for (colo, avg_score, avg_latency, count) in ranking {
-        println!("{:<10} | {:<10.2} | {:<10} | {:<10}", colo, avg_score, avg_latency, count);
+    #[test]
+    fn test_colo_stats() {
+        let mut stats = ColoStats::default();
+        
+        let subnet1 = create_test_subnet("LAX", 80.0, 100);
+        let subnet2 = create_test_subnet("LAX", 90.0, 120);
+        
+        stats.add(&subnet1);
+        stats.add(&subnet2);
+        
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.avg_score(), 85.0);
+        assert_eq!(stats.avg_latency(), 110);
     }
 }

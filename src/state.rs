@@ -1,20 +1,31 @@
 use crate::model::SubnetQuality;
+use crate::utils::generate_random_ip_in_subnet;
+use anyhow::Result;
 use dashmap::DashMap;
 use ipnet::IpNet;
+use parking_lot::RwLock;
 use rand::prelude::*;
 use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
-use anyhow::Result;
+use std::sync::Arc;
+use tracing::debug;
 
+/// IP 管理器 - 管理子网质量数据和 IP 选择
 #[derive(Clone)]
 pub struct IpManager {
-    // Store SubnetQuality keyed by Subnet
+    /// 存储子网质量数据，以子网为键
     subnets: Arc<DashMap<IpNet, SubnetQuality>>,
-    // Cache for best subnets (top K%)
+    /// 最佳子网缓存（top K%）
     best_subnets_cache: Arc<RwLock<Vec<IpNet>>>,
 }
 
+impl Default for IpManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IpManager {
+    /// 创建新的 IP 管理器
     pub fn new() -> Self {
         Self {
             subnets: Arc::new(DashMap::new()),
@@ -22,79 +33,101 @@ impl IpManager {
         }
     }
 
+    /// 更新子网质量数据
     pub fn update_subnet(&self, quality: SubnetQuality) {
+        debug!("Updating subnet {} with score {:.2}", quality.subnet, quality.score);
         self.subnets.insert(quality.subnet, quality);
     }
 
+    /// 重新计算最佳子网缓存
     pub fn recalculate_best_subnets(&self, top_k_percent: f64) {
-        let mut all_subnets: Vec<SubnetQuality> = self.subnets.iter().map(|e| e.value().clone()).collect();
-        
+        let mut all_subnets: Vec<SubnetQuality> =
+            self.subnets.iter().map(|e| e.value().clone()).collect();
+
         if all_subnets.is_empty() {
-            let mut cache = self.best_subnets_cache.write().unwrap();
+            let mut cache = self.best_subnets_cache.write();
             cache.clear();
             return;
         }
 
-        // Sort by score descending
-        all_subnets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        // 按评分降序排序
+        all_subnets.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let total = all_subnets.len();
-        let k = (total as f64 * top_k_percent).ceil() as usize;
-        let k = std::cmp::max(1, k); // At least 1
-        let k = std::cmp::min(k, total);
+        let k = calculate_top_k(total, top_k_percent);
 
         let top_subnets: Vec<IpNet> = all_subnets.iter().take(k).map(|q| q.subnet).collect();
 
+        debug!(
+            "Recalculated best subnets: {} out of {} (top {:.1}%)",
+            k,
+            total,
+            top_k_percent * 100.0
+        );
+
         {
-            let mut cache = self.best_subnets_cache.write().unwrap();
+            let mut cache = self.best_subnets_cache.write();
             *cache = top_subnets;
         }
     }
 
-    // New main interface for getting target IPs for forwarding
-    // 1. Filter subnets by colo (if needed) from the cached "best subnets"
-    // 2. Randomly select n subnets from the filtered best subnets
-    // 3. For each selected subnet, randomly generate m IPs
-    pub fn get_target_ips(&self, target_colos: &[String], n_subnets: usize, m_ips: usize) -> Vec<IpAddr> {
-        let best_subnets = self.best_subnets_cache.read().unwrap();
-        
+    /// 获取用于转发的目标 IP 列表
+    ///
+    /// 策略：
+    /// 1. 从缓存的最佳子网中按 colo 过滤（如果指定）
+    /// 2. 随机选择 n 个子网
+    /// 3. 从每个选中的子网中随机生成 m 个 IP
+    pub fn get_target_ips(
+        &self,
+        target_colos: &[String],
+        n_subnets: usize,
+        m_ips: usize,
+    ) -> Vec<IpAddr> {
+        let best_subnets = self.best_subnets_cache.read();
+
         if best_subnets.is_empty() {
-            // If cache is empty, we might need to fallback or trigger recalculation, 
-            // but normally scanner loop will keep it updated.
-            // For now return empty, server will handle it.
+            debug!("Best subnets cache is empty");
             return Vec::new();
         }
 
-        // Filter by colo
+        // 按 colo 过滤
         let candidates: Vec<IpNet> = if target_colos.is_empty() {
             best_subnets.clone()
         } else {
-             best_subnets.iter()
+            best_subnets
+                .iter()
                 .filter(|&subnet| {
-                    if let Some(entry) = self.subnets.get(subnet) {
-                        target_colos.contains(&entry.value().colo)
-                    } else {
-                        false
-                    }
+                    self.subnets
+                        .get(subnet)
+                        .map(|entry| target_colos.contains(&entry.value().colo))
+                        .unwrap_or(false)
                 })
                 .cloned()
                 .collect()
         };
 
         if candidates.is_empty() {
+            debug!("No candidates after colo filtering");
             return Vec::new();
         }
 
         let mut rng = rand::thread_rng();
-        
-        // Randomly select n subnets
+
+        // 随机选择 n 个子网
         let selected_subnets: Vec<IpNet> = if candidates.len() <= n_subnets {
             candidates
         } else {
-            candidates.choose_multiple(&mut rng, n_subnets).cloned().collect()
+            candidates
+                .choose_multiple(&mut rng, n_subnets)
+                .cloned()
+                .collect()
         };
 
-        // For each subnet, generate m IPs
+        // 为每个子网生成 m 个 IP
         let mut target_ips = Vec::with_capacity(selected_subnets.len() * m_ips);
         for subnet in selected_subnets {
             for _ in 0..m_ips {
@@ -102,60 +135,83 @@ impl IpManager {
             }
         }
 
+        debug!("Generated {} target IPs", target_ips.len());
         target_ips
     }
 
+    /// 获取所有子网质量数据
     pub fn get_all_subnets(&self) -> Vec<SubnetQuality> {
-        self.subnets.iter().map(|entry| entry.value().clone()).collect()
+        self.subnets
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
+    /// 获取子网数量
+    pub fn subnet_count(&self) -> usize {
+        self.subnets.len()
+    }
+
+    /// 获取最佳子网数量
+    pub fn best_subnet_count(&self) -> usize {
+        self.best_subnets_cache.read().len()
+    }
+
+    /// 保存到文件
     pub fn save_to_file(&self, path: &str) -> Result<()> {
         let subnets: Vec<SubnetQuality> = self.get_all_subnets();
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
-        serde_json::to_writer(writer, &subnets)?;
+        serde_json::to_writer_pretty(writer, &subnets)?;
         Ok(())
     }
 
+    /// 从文件加载
     pub fn load_from_file(&self, path: &str, top_k_percent: f64) -> Result<()> {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let subnets: Vec<SubnetQuality> = serde_json::from_reader(reader)?;
-        
+
         self.subnets.clear();
         for subnet in subnets {
             self.subnets.insert(subnet.subnet, subnet);
         }
-        
-        // Refresh cache immediately
+
+        // 立即刷新缓存
         self.recalculate_best_subnets(top_k_percent);
-        
+
         Ok(())
+    }
+
+    /// 清空所有数据
+    pub fn clear(&self) {
+        self.subnets.clear();
+        self.best_subnets_cache.write().clear();
     }
 }
 
-fn generate_random_ip_in_subnet(subnet: &IpNet, rng: &mut ThreadRng) -> IpAddr {
-    match subnet {
-        IpNet::V4(net) => {
-            let start: u32 = net.network().into();
-            let end: u32 = net.broadcast().into();
-            // Avoid network and broadcast addresses if possible, though strict /32 logic applies
-            let start = start + 1; 
-            let end = end - 1;
-            
-            if start > end {
-                // Should not happen for valid /24
-                 IpAddr::V4(std::net::Ipv4Addr::from(start - 1))
-            } else {
-                let ip_u32 = rng.gen_range(start..=end);
-                IpAddr::V4(std::net::Ipv4Addr::from(ip_u32))
-            }
-        }
-        IpNet::V6(net) => {
-            let start: u128 = net.network().into();
-            let end: u128 = net.broadcast().into();
-            let ip_u128 = rng.gen_range(start..=end);
-            IpAddr::V6(std::net::Ipv6Addr::from(ip_u128))
-        }
+/// 计算 top K 的数量
+fn calculate_top_k(total: usize, percent: f64) -> usize {
+    let k = (total as f64 * percent).ceil() as usize;
+    k.clamp(1, total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_top_k() {
+        assert_eq!(calculate_top_k(100, 0.1), 10);
+        assert_eq!(calculate_top_k(100, 0.01), 1);
+        assert_eq!(calculate_top_k(100, 1.0), 100);
+        assert_eq!(calculate_top_k(5, 0.1), 1); // 至少 1
+    }
+
+    #[test]
+    fn test_ip_manager_new() {
+        let manager = IpManager::new();
+        assert_eq!(manager.subnet_count(), 0);
+        assert_eq!(manager.best_subnet_count(), 0);
     }
 }
