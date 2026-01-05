@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::state::IpManager;
 use futures::stream::{FuturesUnordered, StreamExt};
+use socket2::{SockRef, TcpKeepalive};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,6 +71,15 @@ struct ConnectionResult {
     connect_time: Duration,
 }
 
+fn set_tcp_keepalive(stream: &TcpStream) -> anyhow::Result<()> {
+    let socket_ref = SockRef::from(stream);
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(10));
+    socket_ref.set_tcp_keepalive(&keepalive)?;
+    Ok(())
+}
+
 /// 处理单个客户端连接
 async fn handle_connection(
     mut client_stream: TcpStream,
@@ -77,6 +87,10 @@ async fn handle_connection(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
 ) -> anyhow::Result<()> {
+    if let Err(e) = set_tcp_keepalive(&client_stream) {
+        warn!("Failed to set keepalive for client {}: {}", client_addr, e);
+    }
+
     // 获取候选 IP 列表
     let candidate_ips = ip_manager.get_target_ips(
         &config.target_colos,
@@ -169,6 +183,9 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
                 Ok(Ok(stream)) => {
                     // 优化 socket
                     let _ = stream.set_nodelay(true);
+                    if let Err(e) = set_tcp_keepalive(&stream) {
+                        warn!("Failed to set keepalive for target {}: {}", ip, e);
+                    }
                     Some(ConnectionResult {
                         stream,
                         ip,
@@ -211,6 +228,9 @@ async fn connect_with_fallback(ip: IpAddr, port: u16) -> anyhow::Result<TcpStrea
     {
         Ok(Ok(stream)) => {
             let _ = stream.set_nodelay(true);
+            if let Err(e) = set_tcp_keepalive(&stream) {
+                warn!("Failed to set keepalive for fallback {}: {}", target_addr, e);
+            }
             Ok(stream)
         }
         Ok(Err(e)) => {

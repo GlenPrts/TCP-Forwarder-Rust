@@ -3,6 +3,7 @@ use crate::model::{IpQuality, SubnetQuality};
 use crate::state::IpManager;
 use crate::utils::generate_random_ip_in_subnet;
 use anyhow::Result;
+use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use ipnet::IpNet;
 use reqwest::Client;
@@ -13,20 +14,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, info, warn};
 
-/// 请求超时时间（秒）
 const TIMEOUT_SECS: u64 = 2;
-/// 每个 IP 的探测次数
 const PROBE_COUNT: usize = 5;
-/// IPv4 子网掩码（用于分组）
 const SUBNET_MASK: u8 = 24;
-/// 每个子网采样的 IP 数量
 const SAMPLES_PER_SUBNET: usize = 3;
-/// ASN 请求最大重试次数
 const ASN_MAX_RETRIES: usize = 3;
-/// ASN 请求重试间隔（秒）
 const ASN_RETRY_DELAY_SECS: u64 = 2;
 
-/// 扫描结果统计
 #[derive(Debug, Default)]
 pub struct ScanStats {
     pub total_scanned: usize,
@@ -44,7 +38,6 @@ impl ScanStats {
     }
 }
 
-/// 执行一次完整的扫描
 pub async fn run_scan_once(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
@@ -52,7 +45,6 @@ pub async fn run_scan_once(
 ) -> ScanStats {
     let mut root_cidrs = config.cidr_list.clone();
 
-    // 尝试从 ASN 服务获取最新的 CIDR 列表
     match fetch_asn_cidrs(&config.asn_url).await {
         Ok(new_cidrs) => {
             if !new_cidrs.is_empty() {
@@ -66,32 +58,37 @@ pub async fn run_scan_once(
     }
 
     info!(
-        "Starting scan with {} root CIDRs, semaphore permits: {}",
-        root_cidrs.len(),
-        semaphore.available_permits()
+        "Starting scan with {} root CIDRs",
+        root_cidrs.len()
     );
 
-    // 1. 将大 CIDR 拆分为子网（如 /24）
     let target_subnets = split_cidrs_to_subnets(&root_cidrs, SUBNET_MASK);
     info!("Total target subnets to scan: {}", target_subnets.len());
 
-    // 2. 准备扫描任务
+    let mut targets = Vec::with_capacity(target_subnets.len() * SAMPLES_PER_SUBNET);
+    let mut rng = rand::thread_rng();
+    for subnet in &target_subnets {
+        for _ in 0..SAMPLES_PER_SUBNET {
+            let ip = generate_random_ip_in_subnet(subnet, &mut rng);
+            targets.push((*subnet, ip));
+        }
+    }
+    info!("Created {} scan targets", targets.len());
+
     let subnet_results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
         Arc::new(Mutex::new(HashMap::with_capacity(target_subnets.len())));
 
-    let tasks = create_scan_tasks(
-        &target_subnets,
+    let concurrency_limit = semaphore.available_permits().max(50);
+    info!("Scanning with concurrency limit: {}", concurrency_limit);
+
+    let (success_count, total_scanned) = execute_scan_stream(
+        targets,
+        concurrency_limit,
         &config.trace_url,
-        semaphore,
         subnet_results.clone(),
-    );
+    )
+    .await;
 
-    info!("Created {} scan tasks", tasks.len());
-
-    // 3. 执行所有任务并收集结果
-    let (success_count, total_scanned) = execute_scan_tasks(tasks).await;
-
-    // 4. 聚合结果并更新 IpManager
     let results = subnet_results.lock().await;
     let mut updated_subnets = 0;
 
@@ -103,7 +100,6 @@ pub async fn run_scan_once(
         }
     }
 
-    // 5. 更新 top K% 缓存
     ip_manager.recalculate_best_subnets(config.selection_top_k_percent);
 
     let stats = ScanStats {
@@ -123,66 +119,16 @@ pub async fn run_scan_once(
     stats
 }
 
-/// 将 CIDR 列表拆分为指定掩码的子网
-fn split_cidrs_to_subnets(cidrs: &[IpNet], mask: u8) -> Vec<IpNet> {
-    let mut target_subnets = Vec::new();
-    for cidr in cidrs {
-        match cidr.subnets(mask) {
-            Ok(subnets) => target_subnets.extend(subnets),
-            Err(_) => target_subnets.push(*cidr), // 已经小于目标掩码，保持原样
-        }
-    }
-    target_subnets
-}
-
-/// 创建扫描任务
-fn create_scan_tasks(
-    subnets: &[IpNet],
+async fn execute_scan_stream(
+    targets: Vec<(IpNet, IpAddr)>,
+    concurrency_limit: usize,
     trace_url: &str,
-    semaphore: Arc<Semaphore>,
     results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
-) -> Vec<tokio::task::JoinHandle<bool>> {
-    let mut tasks = Vec::with_capacity(subnets.len() * SAMPLES_PER_SUBNET);
-    let mut rng = rand::thread_rng();
-    let trace_url = Arc::new(trace_url.to_string());
-
-    for subnet in subnets {
-        for _ in 0..SAMPLES_PER_SUBNET {
-            let ip = generate_random_ip_in_subnet(subnet, &mut rng);
-            let subnet_clone = *subnet;
-            let semaphore_clone = semaphore.clone();
-            let results_clone = results.clone();
-            let trace_url_clone = trace_url.clone();
-
-            tasks.push(tokio::spawn(async move {
-                // 获取信号量许可，如果失败则跳过
-                let _permit = match semaphore_clone.acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => return false,
-                };
-
-                if let Some(quality) = test_ip(ip, &trace_url_clone).await {
-                    let mut results = results_clone.lock().await;
-                    results
-                        .entry(subnet_clone)
-                        .or_insert_with(Vec::new)
-                        .push(quality);
-                    return true;
-                }
-                false
-            }));
-        }
-    }
-
-    tasks
-}
-
-/// 执行扫描任务并返回统计信息
-async fn execute_scan_tasks(tasks: Vec<tokio::task::JoinHandle<bool>>) -> (usize, usize) {
+) -> (usize, usize) {
     let mut success_count = 0;
     let mut total_scanned = 0;
 
-    let pb = ProgressBar::new(tasks.len() as u64);
+    let pb = ProgressBar::new(targets.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
@@ -191,18 +137,29 @@ async fn execute_scan_tasks(tasks: Vec<tokio::task::JoinHandle<bool>>) -> (usize
     );
     pb.set_message("Scanning IPs...");
 
-    for task in tasks {
-        match task.await {
-            Ok(success) => {
-                total_scanned += 1;
-                if success {
-                    success_count += 1;
-                    pb.set_message(format!("Success: {}", success_count));
-                }
+    let trace_url = Arc::new(trace_url.to_string());
+
+    let mut stream = stream::iter(targets)
+        .map(|(subnet, ip)| {
+            let trace_url = trace_url.clone();
+            async move {
+                let quality = test_ip(ip, &trace_url).await;
+                (subnet, quality)
             }
-            Err(e) => {
-                debug!("Scan task failed: {}", e);
-            }
+        })
+        .buffer_unordered(concurrency_limit);
+
+    while let Some((subnet, quality_opt)) = stream.next().await {
+        total_scanned += 1;
+        if let Some(quality) = quality_opt {
+            success_count += 1;
+            pb.set_message(format!("Success: {}", success_count));
+            
+            let mut guard = results.lock().await;
+            guard
+                .entry(subnet)
+                .or_insert_with(Vec::new)
+                .push(quality);
         }
         pb.inc(1);
     }
@@ -212,7 +169,17 @@ async fn execute_scan_tasks(tasks: Vec<tokio::task::JoinHandle<bool>>) -> (usize
     (success_count, total_scanned)
 }
 
-/// 从 ASN 服务获取 CIDR 列表
+fn split_cidrs_to_subnets(cidrs: &[IpNet], mask: u8) -> Vec<IpNet> {
+    let mut target_subnets = Vec::new();
+    for cidr in cidrs {
+        match cidr.subnets(mask) {
+            Ok(subnets) => target_subnets.extend(subnets),
+            Err(_) => target_subnets.push(*cidr),
+        }
+    }
+    target_subnets
+}
+
 async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
@@ -251,7 +218,6 @@ async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs")))
 }
 
-/// 解析 CIDR 列表文本
 fn parse_cidr_list(text: &str) -> Vec<IpNet> {
     text.lines()
         .filter_map(|line| {
@@ -265,9 +231,7 @@ fn parse_cidr_list(text: &str) -> Vec<IpNet> {
         .collect()
 }
 
-/// 测试单个 IP 的质量
 async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
-    // 从 trace_url 提取主机名用于 DNS 解析
     let url = reqwest::Url::parse(trace_url).ok()?;
     let host = url.host_str()?;
     let port = url.port_or_known_default().unwrap_or(80);
@@ -302,7 +266,6 @@ async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
                 debug!("Probe {} for IP {} failed: {}", probe_idx + 1, ip, e);
             }
         }
-        // 探测之间的小延迟
         if probe_idx < PROBE_COUNT - 1 {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -328,7 +291,6 @@ async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
     Some(IpQuality::new(ip, avg_latency, jitter, loss_rate, last_colo))
 }
 
-/// 计算平均值
 fn calculate_average(values: &[u128]) -> u128 {
     if values.is_empty() {
         0
@@ -337,7 +299,6 @@ fn calculate_average(values: &[u128]) -> u128 {
     }
 }
 
-/// 计算抖动（相邻值差的平均值）
 fn calculate_jitter(latencies: &[u128]) -> u128 {
     if latencies.len() < 2 {
         return 0;
@@ -351,7 +312,6 @@ fn calculate_jitter(latencies: &[u128]) -> u128 {
     (sum_diff / (latencies.len() - 1) as i128) as u128
 }
 
-/// 从 trace 响应中解析 colo 信息
 fn parse_colo(body: &str) -> Option<String> {
     body.lines()
         .find_map(|line| line.strip_prefix("colo=").map(|s| s.to_string()))
@@ -381,7 +341,6 @@ mod tests {
     fn test_calculate_jitter() {
         let latencies = vec![100, 110, 105, 115];
         let jitter = calculate_jitter(&latencies);
-        // |100-110| + |110-105| + |105-115| = 10 + 5 + 10 = 25, avg = 25/3 = 8
         assert_eq!(jitter, 8);
     }
 
