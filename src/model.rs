@@ -52,8 +52,7 @@ impl SubnetQuality {
             (samples.iter().map(|s| s.latency as u64).sum::<u64>()) / sample_count as u64;
         let avg_jitter =
             (samples.iter().map(|s| s.jitter as u64).sum::<u64>()) / sample_count as u64;
-        let avg_loss_rate =
-            samples.iter().map(|s| s.loss_rate).sum::<f32>() / sample_count as f32;
+        let avg_loss_rate = samples.iter().map(|s| s.loss_rate).sum::<f32>() / sample_count as f32;
 
         // 确定主要的 colo（使用众数）
         let colo = determine_primary_colo(samples);
@@ -173,33 +172,15 @@ mod tests {
     #[test]
     fn test_ip_quality_score_calculation() {
         // 完美的 IP：0 延迟，0 抖动，0 丢包
-        let quality = IpQuality::new(
-            "1.2.3.4".parse().unwrap(),
-            0,
-            0,
-            0.0,
-            "LAX".to_string(),
-        );
+        let quality = IpQuality::new("1.2.3.4".parse().unwrap(), 0, 0, 0.0, "LAX".to_string());
         assert_eq!(quality.score, 100.0);
 
         // 100ms 延迟
-        let quality = IpQuality::new(
-            "1.2.3.4".parse().unwrap(),
-            100,
-            0,
-            0.0,
-            "LAX".to_string(),
-        );
+        let quality = IpQuality::new("1.2.3.4".parse().unwrap(), 100, 0, 0.0, "LAX".to_string());
         assert_eq!(quality.score, 90.0); // 100 - 10
 
         // 1% 丢包
-        let quality = IpQuality::new(
-            "1.2.3.4".parse().unwrap(),
-            0,
-            0,
-            0.01,
-            "LAX".to_string(),
-        );
+        let quality = IpQuality::new("1.2.3.4".parse().unwrap(), 0, 0, 0.01, "LAX".to_string());
         assert_eq!(quality.score, 0.0); // 100 - 100 = 0
     }
 

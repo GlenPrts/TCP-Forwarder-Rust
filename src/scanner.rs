@@ -48,7 +48,10 @@ pub async fn run_scan_once(
     match fetch_asn_cidrs(&config.asn_url).await {
         Ok(new_cidrs) => {
             if !new_cidrs.is_empty() {
-                info!("Updated CIDR list with {} subnets from ASN", new_cidrs.len());
+                info!(
+                    "Updated CIDR list with {} subnets from ASN",
+                    new_cidrs.len()
+                );
                 root_cidrs = new_cidrs;
             }
         }
@@ -57,10 +60,7 @@ pub async fn run_scan_once(
         }
     }
 
-    info!(
-        "Starting scan with {} root CIDRs",
-        root_cidrs.len()
-    );
+    info!("Starting scan with {} root CIDRs", root_cidrs.len());
 
     let target_subnets = split_cidrs_to_subnets(&root_cidrs, SUBNET_MASK);
     info!("Total target subnets to scan: {}", target_subnets.len());
@@ -154,12 +154,9 @@ async fn execute_scan_stream(
         if let Some(quality) = quality_opt {
             success_count += 1;
             pb.set_message(format!("Success: {}", success_count));
-            
+
             let mut guard = results.lock().await;
-            guard
-                .entry(subnet)
-                .or_insert_with(Vec::new)
-                .push(quality);
+            guard.entry(subnet).or_insert_with(Vec::new).push(quality);
         }
         pb.inc(1);
     }
@@ -181,9 +178,7 @@ fn split_cidrs_to_subnets(cidrs: &[IpNet], mask: u8) -> Vec<IpNet> {
 }
 
 async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(15)).build()?;
 
     let mut last_error = None;
 
@@ -288,7 +283,13 @@ async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
         loss_rate * 100.0
     );
 
-    Some(IpQuality::new(ip, avg_latency, jitter, loss_rate, last_colo))
+    Some(IpQuality::new(
+        ip,
+        avg_latency,
+        jitter,
+        loss_rate,
+        last_colo,
+    ))
 }
 
 fn calculate_average(values: &[u128]) -> u128 {

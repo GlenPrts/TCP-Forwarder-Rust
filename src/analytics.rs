@@ -157,13 +157,13 @@ mod tests {
     #[test]
     fn test_colo_stats() {
         let mut stats = ColoStats::default();
-        
+
         let subnet1 = create_test_subnet("LAX", 80.0, 100);
         let subnet2 = create_test_subnet("LAX", 90.0, 120);
-        
+
         stats.add(&subnet1);
         stats.add(&subnet2);
-        
+
         assert_eq!(stats.count, 2);
         assert_eq!(stats.avg_score(), 85.0);
         assert_eq!(stats.avg_latency(), 110);

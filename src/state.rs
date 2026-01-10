@@ -35,7 +35,10 @@ impl IpManager {
 
     /// 更新子网质量数据
     pub fn update_subnet(&self, quality: SubnetQuality) {
-        debug!("Updating subnet {} with score {:.2}", quality.subnet, quality.score);
+        debug!(
+            "Updating subnet {} with score {:.2}",
+            quality.subnet, quality.score
+        );
         self.subnets.insert(quality.subnet, quality);
     }
 

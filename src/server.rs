@@ -175,9 +175,11 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
         let target_addr = SocketAddr::new(ip, target_port);
         tasks.push(async move {
             let start = Instant::now();
-            let connect_result =
-                timeout(Duration::from_millis(CONNECT_TIMEOUT_MS), TcpStream::connect(target_addr))
-                    .await;
+            let connect_result = timeout(
+                Duration::from_millis(CONNECT_TIMEOUT_MS),
+                TcpStream::connect(target_addr),
+            )
+            .await;
 
             match connect_result {
                 Ok(Ok(stream)) => {
@@ -229,12 +231,18 @@ async fn connect_with_fallback(ip: IpAddr, port: u16) -> anyhow::Result<TcpStrea
         Ok(Ok(stream)) => {
             let _ = stream.set_nodelay(true);
             if let Err(e) = set_tcp_keepalive(&stream) {
-                warn!("Failed to set keepalive for fallback {}: {}", target_addr, e);
+                warn!(
+                    "Failed to set keepalive for fallback {}: {}",
+                    target_addr, e
+                );
             }
             Ok(stream)
         }
         Ok(Err(e)) => {
-            error!("Failed to establish fallback connection to {}: {}", target_addr, e);
+            error!(
+                "Failed to establish fallback connection to {}: {}",
+                target_addr, e
+            );
             Err(e.into())
         }
         Err(_) => {

@@ -1,13 +1,7 @@
 use crate::config::AppConfig;
 use crate::model::SubnetQuality;
 use crate::state::IpManager;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -81,14 +75,22 @@ async fn health_check(State(ip_manager): State<IpManager>) -> impl IntoResponse 
 async fn get_status(State(ip_manager): State<IpManager>) -> Json<Vec<SubnetQuality>> {
     let mut subnets: Vec<SubnetQuality> = ip_manager.get_all_subnets();
     // 按评分降序排序
-    subnets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    subnets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Json(subnets)
 }
 
 /// 获取子网列表（新 API，带元数据）
 async fn get_subnets_api(State(ip_manager): State<IpManager>) -> Json<StatusResponse> {
     let mut subnets: Vec<SubnetQuality> = ip_manager.get_all_subnets();
-    subnets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    subnets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Json(StatusResponse {
         total_subnets: subnets.len(),
