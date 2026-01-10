@@ -5,6 +5,7 @@
 ## 核心特性
 
 *   **基于 CIDR 的智能扫描**: 专门的扫描模式 (`--scan`)，自动将大网段拆分为子网（/24），并对每个子网进行采样评分，筛选优质 IP 段。
+*   **自适应扫描策略**: 新增三阶段自适应扫描（广域稀疏扫描 -> 热点区域分析 -> 重点区域精细扫描），大幅提升扫描效率，快速定位优质网段。
 *   **灵活的转发策略**: 支持基于评分的 Top K% 筛选，并在转发时采用随机选段 + 随机选 IP 的两级随机策略，有效均衡负载并避免拥塞。
 *   **持久化存储**: 扫描结果以子网为单位保存到本地文件，转发服务启动时直接加载。
 *   **并发连接竞速**: 转发流量时，同时向多个优选 IP 段内的随机 IP 发起连接，使用最快建立的连接，显著降低握手延迟。
@@ -39,7 +40,14 @@
   "ip_store_file": "subnet_results.json",
   "selection_top_k_percent": 0.1,
   "selection_random_n_subnets": 3,
-  "selection_random_m_ips": 2
+  "selection_random_m_ips": 2,
+  "scan_strategy": {
+    "type": "adaptive",
+    "initial_scan_mask": 20,
+    "initial_samples_per_subnet": 1,
+    "promising_subnet_percent": 0.2,
+    "focused_samples_per_subnet": 3
+  }
 }
 ```
 
@@ -58,6 +66,12 @@
     *   `selection_random_n_subnets`: 每次建立连接时，从优选 IP 段中随机选取的 IP 段数量。
     *   `selection_random_m_ips`: 在每个选中的 IP 段内，随机生成的 IP 数量。
     *   *说明：总并发连接尝试数 = n * m*
+*   **扫描策略 (`scan_strategy`)**:
+    *   `type`: 扫描策略类型，可选 `"adaptive"` (自适应，推荐) 或 `"full_scan"` (全量扫描)。
+    *   `initial_scan_mask`: [自适应] 阶段一（广域稀疏扫描）使用的 CIDR 掩码（默认 20）。
+    *   `initial_samples_per_subnet`: [自适应] 阶段一每个大网段的采样数（默认 1）。
+    *   `promising_subnet_percent`: [自适应] 阶段二筛选“热点区域”的比例（默认 0.2，即前 20%）。
+    *   `focused_samples_per_subnet`: [自适应] 阶段三（精细扫描）每个 /24 子网的采样数（默认 3）。
 
 **注意**：配置文件现在支持自动验证。如果 `selection_top_k_percent` 不在 0-1 范围内，或 `selection_random_n_subnets`/`selection_random_m_ips` 小于等于 0，程序将拒绝启动并显示错误消息。
 
@@ -112,6 +126,19 @@ cargo build --release
 构建产物位于 `target/release/tcp-forwarder-rust` (Linux/macOS) 或 `target/release/tcp-forwarder-rust.exe` (Windows)。
 
 ## 最近改进
+
+### v0.2.3 (2026-01-10)
+
+**核心改进：**
+
+1.  **自适应扫描策略 (Adaptive Scanning)**:
+    - 引入了三阶段扫描机制：广域稀疏扫描 -> 热点区域分析 -> 重点区域精细扫描。
+    - 相比传统的全量扫描，大幅减少了无效探测，显著提升了扫描效率。
+    - 支持通过配置文件灵活调整各阶段的参数（掩码大小、采样数、筛选比例等）。
+
+2.  **配置系统升级**:
+    - 新增 `scan_strategy` 配置块，支持动态切换扫描策略。
+    - 完善了配置参数的验证逻辑，确保自适应扫描参数的合法性。
 
 ### v0.2.2 (2026-01-04)
 

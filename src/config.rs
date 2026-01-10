@@ -30,6 +30,98 @@ pub enum ConfigError {
 
     #[error("ip_store_file cannot be empty")]
     EmptyIpStoreFile,
+
+    #[error("initial_scan_mask must be between 8 and 32")]
+    InvalidInitialScanMask,
+
+    #[error("promising_subnet_percent must be between 0 and 1, got {0}")]
+    InvalidPromisingSubnetPercent(f64),
+}
+
+/// 扫描策略类型
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanStrategyType {
+    /// 全面扫描
+    FullScan,
+    /// 自适应扫描
+    Adaptive,
+}
+
+impl Default for ScanStrategyType {
+    fn default() -> Self {
+        Self::FullScan
+    }
+}
+
+/// 扫描策略配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanStrategyConfig {
+    /// 策略类型: "full_scan" 或 "adaptive"
+    #[serde(default)]
+    pub r#type: ScanStrategyType,
+
+    /// [自适应] 阶段一使用的CIDR掩码 (例如 20)
+    #[serde(default = "default_initial_scan_mask")]
+    pub initial_scan_mask: u8,
+
+    /// [自适应] 阶段一每个大子网的采样数 (例如 1)
+    #[serde(default = "default_initial_samples_per_subnet")]
+    pub initial_samples_per_subnet: usize,
+
+    /// [自适应] 阶段二筛选“热点区域”时使用的百分比 (0.0-1.0)
+    #[serde(default = "default_promising_subnet_percent")]
+    pub promising_subnet_percent: f64,
+
+    /// [自适应] 阶段三精细扫描时每个 /24 子网的采样数
+    #[serde(default = "default_focused_samples_per_subnet")]
+    pub focused_samples_per_subnet: usize,
+}
+
+fn default_initial_scan_mask() -> u8 {
+    20
+}
+
+fn default_initial_samples_per_subnet() -> usize {
+    1
+}
+
+fn default_promising_subnet_percent() -> f64 {
+    0.2
+}
+
+fn default_focused_samples_per_subnet() -> usize {
+    3
+}
+
+impl Default for ScanStrategyConfig {
+    fn default() -> Self {
+        Self {
+            r#type: ScanStrategyType::default(),
+            initial_scan_mask: default_initial_scan_mask(),
+            initial_samples_per_subnet: default_initial_samples_per_subnet(),
+            promising_subnet_percent: default_promising_subnet_percent(),
+            focused_samples_per_subnet: default_focused_samples_per_subnet(),
+        }
+    }
+}
+
+impl ScanStrategyConfig {
+    /// 验证扫描策略配置
+    pub fn validate(&self) -> Result<()> {
+        if self.r#type == ScanStrategyType::Adaptive {
+            if self.initial_scan_mask < 8 || self.initial_scan_mask > 32 {
+                return Err(ConfigError::InvalidInitialScanMask.into());
+            }
+            if self.promising_subnet_percent <= 0.0 || self.promising_subnet_percent >= 1.0 {
+                return Err(ConfigError::InvalidPromisingSubnetPercent(
+                    self.promising_subnet_percent,
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 应用配置
@@ -73,6 +165,10 @@ pub struct AppConfig {
     /// 每个选中的 IP 段内随机生成的 IP 数量
     #[serde(default = "default_m_ips")]
     pub selection_random_m_ips: usize,
+
+    /// 扫描策略配置
+    #[serde(default)]
+    pub scan_strategy: ScanStrategyConfig,
 }
 
 fn default_top_k_percent() -> f64 {
@@ -104,6 +200,7 @@ impl Default for AppConfig {
             selection_top_k_percent: default_top_k_percent(),
             selection_random_n_subnets: default_n_subnets(),
             selection_random_m_ips: default_m_ips(),
+            scan_strategy: ScanStrategyConfig::default(),
         }
     }
 }
@@ -151,6 +248,8 @@ impl AppConfig {
             return Err(ConfigError::EmptyIpStoreFile.into());
         }
 
+        self.scan_strategy.validate()?;
+
         Ok(())
     }
 
@@ -194,6 +293,30 @@ mod tests {
     fn test_invalid_m_ips() {
         let mut config = AppConfig::default();
         config.selection_random_m_ips = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_adaptive_scan_config_validation() {
+        let mut config = AppConfig::default();
+        config.scan_strategy.r#type = ScanStrategyType::Adaptive;
+
+        // Valid
+        config.scan_strategy.initial_scan_mask = 20;
+        config.scan_strategy.promising_subnet_percent = 0.2;
+        assert!(config.validate().is_ok());
+
+        // Invalid mask
+        config.scan_strategy.initial_scan_mask = 7;
+        assert!(config.validate().is_err());
+        config.scan_strategy.initial_scan_mask = 33;
+        assert!(config.validate().is_err());
+        config.scan_strategy.initial_scan_mask = 20; // reset
+
+        // Invalid percent
+        config.scan_strategy.promising_subnet_percent = 0.0;
+        assert!(config.validate().is_err());
+        config.scan_strategy.promising_subnet_percent = 1.0;
         assert!(config.validate().is_err());
     }
 
