@@ -220,7 +220,7 @@ impl AppConfig {
 
     /// 验证配置参数
     pub fn validate(&self) -> Result<()> {
-        if self.target_port == 0 || self.target_port > 65535 {
+        if self.target_port == 0 {
             return Err(ConfigError::InvalidTargetPort.into());
         }
 
@@ -281,11 +281,6 @@ impl AppConfig {
         self.scan_strategy.validate()?;
 
         Ok(())
-    }
-
-    /// 获取总并发连接尝试数
-    pub fn total_concurrent_connections(&self) -> usize {
-        self.selection_random_n_subnets * self.selection_random_m_ips
     }
 }
 
@@ -348,14 +343,5 @@ mod tests {
         assert!(config.validate().is_err());
         config.scan_strategy.promising_subnet_percent = 1.0;
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_total_concurrent_connections() {
-        let config = AppConfig::default();
-        assert_eq!(
-            config.total_concurrent_connections(),
-            config.selection_random_n_subnets * config.selection_random_m_ips
-        );
     }
 }

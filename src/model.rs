@@ -14,7 +14,7 @@ mod scoring {
     /// 抖动惩罚系数（每 5ms 扣 1 分，比延迟更严重）
     pub const JITTER_PENALTY_PER_5MS: f32 = 1.0;
     /// 丢包惩罚系数（每 1% 丢包扣 100 分）
-    pub const LOSS_PENALTY_PER_PERCENT: f32 = 100.0;
+    pub const LOSS_PENALTY_PER_PERCENT: f32 = 50.0;
 }
 
 /// 子网质量数据
@@ -153,7 +153,7 @@ impl IpQuality {
         let latency_penalty = (self.latency as f32) / 10.0 * LATENCY_PENALTY_PER_10MS;
         let jitter_penalty = (self.jitter as f32) / 5.0 * JITTER_PENALTY_PER_5MS;
         // 调整丢包惩罚：每 1% 丢包扣 50 分，而不是 100 分
-        let loss_penalty = self.loss_rate * 100.0 * 50.0;
+        let loss_penalty = self.loss_rate * 100.0 * LOSS_PENALTY_PER_PERCENT;
 
         let score = (BASE_SCORE - latency_penalty - jitter_penalty - loss_penalty).max(0.0);
 
