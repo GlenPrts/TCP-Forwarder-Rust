@@ -220,7 +220,7 @@ impl AppConfig {
 
     /// 验证配置参数
     pub fn validate(&self) -> Result<()> {
-        if self.target_port == 0 {
+        if self.target_port == 0 || self.target_port > 65535 {
             return Err(ConfigError::InvalidTargetPort.into());
         }
 
@@ -240,12 +240,42 @@ impl AppConfig {
             return Err(ConfigError::EmptyCidrList.into());
         }
 
+        // 验证 CIDR 格式（简单检查）
+        for cidr in &self.cidr_list {
+            // 检查字符串表示是否包含斜杠（基本格式验证）
+            let cidr_str = cidr.to_string();
+            if !cidr_str.contains('/') {
+                return Err(anyhow::anyhow!("Invalid CIDR format: {}", cidr));
+            }
+        }
+
         if self.trace_url.is_empty() {
             return Err(ConfigError::EmptyTraceUrl.into());
         }
 
+        // 验证 URL 格式
+        if let Err(e) = reqwest::Url::parse(&self.trace_url) {
+            return Err(anyhow::anyhow!("Invalid trace_url: {}", e));
+        }
+
         if self.ip_store_file.is_empty() {
             return Err(ConfigError::EmptyIpStoreFile.into());
+        }
+
+        // 验证监听地址格式
+        if let Err(e) = self.bind_addr.to_string().parse::<std::net::SocketAddr>() {
+            return Err(anyhow::anyhow!("Invalid bind_addr: {}", e));
+        }
+
+        if let Err(e) = self.web_addr.to_string().parse::<std::net::SocketAddr>() {
+            return Err(anyhow::anyhow!("Invalid web_addr: {}", e));
+        }
+
+        // 验证 ASN URL（如果提供）
+        if !self.asn_url.is_empty() {
+            if let Err(e) = reqwest::Url::parse(&self.asn_url) {
+                return Err(anyhow::anyhow!("Invalid asn_url: {}", e));
+            }
         }
 
         self.scan_strategy.validate()?;

@@ -289,6 +289,11 @@ async fn execute_scan_stream(
     let mut success_count = 0;
     let mut total_scanned = 0;
 
+    // 如果没有目标，直接返回
+    if targets.is_empty() {
+        return (0, 0);
+    }
+
     let pb = ProgressBar::new(targets.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -300,6 +305,7 @@ async fn execute_scan_stream(
 
     let trace_url = Arc::new(trace_url.to_string());
 
+    // 使用流式处理，避免一次性加载所有目标到内存
     let mut stream = stream::iter(targets)
         .map(|(subnet, ip)| {
             let trace_url = trace_url.clone();
@@ -310,16 +316,34 @@ async fn execute_scan_stream(
         })
         .buffer_unordered(concurrency_limit);
 
+    // 批量处理结果，减少锁竞争
+    let mut batch: Vec<(IpNet, IpQuality)> = Vec::with_capacity(100);
+    const BATCH_SIZE: usize = 100;
+
     while let Some((subnet, quality_opt)) = stream.next().await {
         total_scanned += 1;
         if let Some(quality) = quality_opt {
             success_count += 1;
             pb.set_message(format!("Success: {}", success_count));
+            batch.push((subnet, quality));
 
-            let mut guard = results.lock().await;
-            guard.entry(subnet).or_insert_with(Vec::new).push(quality);
+            // 批量写入，减少锁竞争
+            if batch.len() >= BATCH_SIZE {
+                let mut guard = results.lock().await;
+                for (subnet, quality) in batch.drain(..) {
+                    guard.entry(subnet).or_insert_with(Vec::new).push(quality);
+                }
+            }
         }
         pb.inc(1);
+    }
+
+    // 处理剩余的批次
+    if !batch.is_empty() {
+        let mut guard = results.lock().await;
+        for (subnet, quality) in batch {
+            guard.entry(subnet).or_insert_with(Vec::new).push(quality);
+        }
     }
 
     pb.finish_with_message(format!("Scan complete. Found {} valid IPs.", success_count));

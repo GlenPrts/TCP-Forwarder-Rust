@@ -146,13 +146,14 @@ impl IpQuality {
     /// - 基础分：100
     /// - 延迟惩罚：每 10ms 扣 1 分
     /// - 抖动惩罚：每 5ms 扣 1 分（抖动比延迟更影响体验）
-    /// - 丢包惩罚：每 1% 丢包扣 100 分（丢包是最严重的问题）
+    /// - 丢包惩罚：每 1% 丢包扣 50 分（调整为更温和的惩罚，避免负分）
     pub fn calculate_score(&mut self) {
         use scoring::*;
 
         let latency_penalty = (self.latency as f32) / 10.0 * LATENCY_PENALTY_PER_10MS;
         let jitter_penalty = (self.jitter as f32) / 5.0 * JITTER_PENALTY_PER_5MS;
-        let loss_penalty = self.loss_rate * 100.0 * LOSS_PENALTY_PER_PERCENT;
+        // 调整丢包惩罚：每 1% 丢包扣 50 分，而不是 100 分
+        let loss_penalty = self.loss_rate * 100.0 * 50.0;
 
         let score = (BASE_SCORE - latency_penalty - jitter_penalty - loss_penalty).max(0.0);
 

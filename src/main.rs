@@ -92,10 +92,11 @@ async fn main() {
             Arc::new(cfg)
         }
         Err(e) => {
-            error!(
-                "Failed to load config.json: {}. Using default configuration may cause unexpected behavior.",
+            warn!(
+                "Failed to load config.json: {}. Using default configuration.",
                 e
             );
+            warn!("Note: Default configuration may not be optimal for your environment.");
             Arc::new(AppConfig::default())
         }
     };

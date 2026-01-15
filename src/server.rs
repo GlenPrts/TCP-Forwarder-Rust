@@ -169,32 +169,44 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
         return None;
     }
 
+    // 使用 CancellationToken 来取消未完成的任务
+    let cancel_token = tokio_util::sync::CancellationToken::new();
     let mut tasks = FuturesUnordered::new();
 
     for &ip in candidate_ips {
         let target_addr = SocketAddr::new(ip, target_port);
+        let cancel_clone = cancel_token.clone();
+        
         tasks.push(async move {
-            let start = Instant::now();
-            let connect_result = timeout(
-                Duration::from_millis(CONNECT_TIMEOUT_MS),
-                TcpStream::connect(target_addr),
-            )
-            .await;
-
-            match connect_result {
-                Ok(Ok(stream)) => {
-                    // 优化 socket
-                    let _ = stream.set_nodelay(true);
-                    if let Err(e) = set_tcp_keepalive(&stream) {
-                        warn!("Failed to set keepalive for target {}: {}", ip, e);
-                    }
-                    Some(ConnectionResult {
-                        stream,
-                        ip,
-                        connect_time: start.elapsed(),
-                    })
+            tokio::select! {
+                _ = cancel_clone.cancelled() => {
+                    debug!("Connection task cancelled for {}", ip);
+                    None
                 }
-                _ => None,
+                result = async {
+                    let start = Instant::now();
+                    let connect_result = timeout(
+                        Duration::from_millis(CONNECT_TIMEOUT_MS),
+                        TcpStream::connect(target_addr),
+                    )
+                    .await;
+
+                    match connect_result {
+                        Ok(Ok(stream)) => {
+                            // 优化 socket
+                            let _ = stream.set_nodelay(true);
+                            if let Err(e) = set_tcp_keepalive(&stream) {
+                                warn!("Failed to set keepalive for target {}: {}", ip, e);
+                            }
+                            Some(ConnectionResult {
+                                stream,
+                                ip,
+                                connect_time: start.elapsed(),
+                            })
+                        }
+                        _ => None,
+                    }
+                } => result,
             }
         });
     }
@@ -204,6 +216,8 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
         result = async {
             while let Some(res) = tasks.next().await {
                 if let Some(conn) = res {
+                    // 找到最快连接，取消其他任务
+                    cancel_token.cancel();
                     return Some(conn);
                 }
             }
@@ -211,6 +225,8 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
         } => result,
         _ = tokio::time::sleep(Duration::from_millis(SELECTION_TIMEOUT_MS)) => {
             debug!("Connection selection timed out");
+            // 超时后取消所有剩余任务
+            cancel_token.cancel();
             None
         }
     };

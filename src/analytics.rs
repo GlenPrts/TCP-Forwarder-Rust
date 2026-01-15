@@ -15,10 +15,11 @@ struct ColoStats {
 impl ColoStats {
     fn add(&mut self, subnet: &SubnetQuality) {
         self.total_score += subnet.score;
-        self.total_latency += subnet.avg_latency;
-        self.total_jitter += subnet.avg_jitter;
+        // 使用 saturating_add 防止整数溢出
+        self.total_latency = self.total_latency.saturating_add(subnet.avg_latency);
+        self.total_jitter = self.total_jitter.saturating_add(subnet.avg_jitter);
         self.total_loss_rate += subnet.avg_loss_rate;
-        self.count += 1;
+        self.count = self.count.saturating_add(1);
     }
 
     fn avg_score(&self) -> f32 {
