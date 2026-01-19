@@ -13,11 +13,14 @@
 - **关键依赖**: `tokio`, `axum`, `reqwest`, `serde`, `tracing`, `anyhow`, `thiserror`
 - **架构**:
   - `src/main.rs`: 入口点，参数解析，优雅停机。
-  - `src/server.rs`: TCP 转发逻辑，包含并发连接竞速机制。
-  - `src/scanner.rs`: IP 延迟扫描与评分。
+  - `src/server.rs`: TCP 转发逻辑，包含并发连接竞速机制和 TCP Keepalive。
+  - `src/scanner.rs`: IP 延迟扫描与评分，支持自适应三阶段扫描。
   - `src/state.rs`: 共享状态管理 (`IpManager`)。
-  - `src/config.rs`: 配置加载与验证。
+  - `src/config.rs`: 配置加载与验证（使用 `ipnetwork` 解析 CIDR）。
   - `src/web.rs`: Web 监控接口。
+  - `src/utils.rs`: 通用工具函数（IP 生成等）。
+  - `src/analytics.rs`: 数据中心统计分析。
+  - `src/model.rs`: 核心数据结构定义。
 
 ## 构建与测试命令 (Build & Test Commands)
 
@@ -109,3 +112,20 @@ cargo clippy -- -D warnings
 
 ### 网络健壮性 (Network Robustness)
 - 确保为长连接（包括客户端和远程端）启用了 TCP Keepalive，以便及时检测死链。
+
+## 代码规范补充 (Additional Code Conventions)
+
+### 行宽与函数规模
+- **行宽限制**: 单行代码长度不得超过 80 个字符。
+- **函数规模**: 单个函数长度不得超过 60 行。
+- **嵌套层级**: 代码逻辑嵌套深度不得超过 3 层。
+- **文件规模**: 单个文件长度不得超过 1000 行。
+- **逻辑拆分**: 一旦超出上述限制，必须进行逻辑拆分。
+
+### 数值安全
+- 除法运算使用 `checked_div` 防止除零错误。
+- 浮点数排序使用 `total_cmp` 而非 `partial_cmp`，正确处理 NaN。
+
+### 禁止 else
+- 代码中严禁出现 `else` 或 `else if`。
+- 应通过卫语句 (Guard Clauses)、提前返回 (Early Return) 重构逻辑。

@@ -92,11 +92,7 @@ pub fn get_colo_ranking(ip_manager: &IpManager) -> Vec<ColoRankingEntry> {
         .collect();
 
     // 按平均评分降序排序
-    ranking.sort_by(|a, b| {
-        b.avg_score
-            .partial_cmp(&a.avg_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    ranking.sort_by(|a, b| b.avg_score.total_cmp(&a.avg_score));
 
     ranking
 }

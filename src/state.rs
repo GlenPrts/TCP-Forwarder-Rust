@@ -53,12 +53,7 @@ impl IpManager {
             return;
         }
 
-        // 按评分降序排序
-        all_subnets.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        all_subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
 
         let total = all_subnets.len();
         let k = calculate_top_k(total, top_k_percent);
@@ -155,11 +150,6 @@ impl IpManager {
         self.subnets.len()
     }
 
-    /// 获取最佳子网数量
-    pub fn best_subnet_count(&self) -> usize {
-        self.best_subnets_cache.read().len()
-    }
-
     /// 保存到文件
     pub fn save_to_file(&self, path: &str) -> Result<()> {
         let subnets: Vec<SubnetQuality> = self.get_all_subnets();
@@ -185,12 +175,6 @@ impl IpManager {
 
         Ok(())
     }
-
-    /// 清空所有数据
-    pub fn clear(&self) {
-        self.subnets.clear();
-        self.best_subnets_cache.write().clear();
-    }
 }
 
 /// 计算 top K 的数量
@@ -215,6 +199,5 @@ mod tests {
     fn test_ip_manager_new() {
         let manager = IpManager::new();
         assert_eq!(manager.subnet_count(), 0);
-        assert_eq!(manager.best_subnet_count(), 0);
     }
 }

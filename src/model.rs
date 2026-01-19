@@ -48,10 +48,8 @@ impl SubnetQuality {
         let sample_count = samples.len();
 
         // 计算平均值
-        let avg_latency =
-            (samples.iter().map(|s| s.latency as u64).sum::<u64>()) / sample_count as u64;
-        let avg_jitter =
-            (samples.iter().map(|s| s.jitter as u64).sum::<u64>()) / sample_count as u64;
+        let avg_latency = (samples.iter().map(|s| s.latency).sum::<u64>()) / sample_count as u64;
+        let avg_jitter = (samples.iter().map(|s| s.jitter).sum::<u64>()) / sample_count as u64;
         let avg_loss_rate = samples.iter().map(|s| s.loss_rate).sum::<f32>() / sample_count as f32;
 
         // 确定主要的 colo（使用众数）
@@ -180,9 +178,9 @@ mod tests {
         let quality = IpQuality::new("1.2.3.4".parse().unwrap(), 100, 0, 0.0, "LAX".to_string());
         assert_eq!(quality.score, 90.0); // 100 - 10
 
-        // 1% 丢包
+        // 1% 丢包（每 1% 扣 50 分）
         let quality = IpQuality::new("1.2.3.4".parse().unwrap(), 0, 0, 0.01, "LAX".to_string());
-        assert_eq!(quality.score, 0.0); // 100 - 100 = 0
+        assert_eq!(quality.score, 50.0); // 100 - 50 = 50
     }
 
     #[test]

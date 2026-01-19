@@ -60,12 +60,10 @@ pub async fn start_web_server(
 
 /// 健康检查端点
 async fn health_check(State(ip_manager): State<IpManager>) -> impl IntoResponse {
-    let subnet_count = ip_manager.get_all_subnets().len();
-
     let response = HealthResponse {
         status: "healthy",
         version: env!("CARGO_PKG_VERSION"),
-        subnet_count,
+        subnet_count: ip_manager.subnet_count(),
     };
 
     (StatusCode::OK, Json(response))
@@ -75,22 +73,14 @@ async fn health_check(State(ip_manager): State<IpManager>) -> impl IntoResponse 
 async fn get_status(State(ip_manager): State<IpManager>) -> Json<Vec<SubnetQuality>> {
     let mut subnets: Vec<SubnetQuality> = ip_manager.get_all_subnets();
     // 按评分降序排序
-    subnets.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
     Json(subnets)
 }
 
 /// 获取子网列表（新 API，带元数据）
 async fn get_subnets_api(State(ip_manager): State<IpManager>) -> Json<StatusResponse> {
     let mut subnets: Vec<SubnetQuality> = ip_manager.get_all_subnets();
-    subnets.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
 
     Json(StatusResponse {
         total_subnets: subnets.len(),

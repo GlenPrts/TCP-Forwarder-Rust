@@ -39,19 +39,14 @@ pub enum ConfigError {
 }
 
 /// 扫描策略类型
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanStrategyType {
     /// 全面扫描
+    #[default]
     FullScan,
     /// 自适应扫描
     Adaptive,
-}
-
-impl Default for ScanStrategyType {
-    fn default() -> Self {
-        Self::FullScan
-    }
 }
 
 /// 扫描策略配置
@@ -238,15 +233,6 @@ impl AppConfig {
 
         if self.cidr_list.is_empty() {
             return Err(ConfigError::EmptyCidrList.into());
-        }
-
-        // 验证 CIDR 格式（简单检查）
-        for cidr in &self.cidr_list {
-            // 检查字符串表示是否包含斜杠（基本格式验证）
-            let cidr_str = cidr.to_string();
-            if !cidr_str.contains('/') {
-                return Err(anyhow::anyhow!("Invalid CIDR format: {}", cidr));
-            }
         }
 
         if self.trace_url.is_empty() {

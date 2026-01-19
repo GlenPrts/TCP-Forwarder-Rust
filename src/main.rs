@@ -13,7 +13,7 @@ use config::AppConfig;
 use scanner::run_scan_once;
 use server::start_server;
 use state::IpManager;
-use tokio::sync::Semaphore;
+
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use web::start_web_server;
@@ -108,8 +108,7 @@ async fn main() {
     // 扫描模式
     if cli_args.scan {
         info!("Running in scan mode...");
-        let semaphore = Arc::new(Semaphore::new(200));
-        run_scan_once(config.clone(), ip_manager.clone(), semaphore).await;
+        run_scan_once(config.clone(), ip_manager.clone(), 200).await;
 
         if let Err(e) = ip_manager.save_to_file(&config.ip_store_file) {
             error!("Failed to save scan results: {}", e);

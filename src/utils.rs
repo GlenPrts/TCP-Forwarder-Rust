@@ -30,7 +30,7 @@ pub fn generate_random_ip_in_subnet(subnet: &IpNet, rng: &mut impl Rng) -> IpAdd
         IpNet::V6(net) => {
             let start: u128 = net.network().into();
             let end: u128 = net.broadcast().into();
-            
+
             // 对于 /128 和 /127 子网，直接使用整个范围
             // 对于更大的子网，避开网络地址
             let (effective_start, effective_end) = if end - start >= 2 {
@@ -78,5 +78,52 @@ mod tests {
 
         let ip = generate_random_ip_in_subnet(&subnet, &mut rng);
         assert!(subnet.contains(&ip));
+    }
+
+    #[test]
+    fn test_generate_random_ip_in_subnet_v6() {
+        let subnet: IpNet = "2001:db8::/64".parse().unwrap();
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..100 {
+            let ip = generate_random_ip_in_subnet(&subnet, &mut rng);
+            assert!(subnet.contains(&ip));
+
+            // 确保生成的是 IPv6 地址
+            assert!(ip.is_ipv6());
+        }
+    }
+
+    #[test]
+    fn test_generate_random_ip_in_small_subnet_v6() {
+        // /127 子网：只有 2 个地址
+        let subnet: IpNet = "2001:db8::0/127".parse().unwrap();
+        let mut rng = rand::thread_rng();
+
+        let ip = generate_random_ip_in_subnet(&subnet, &mut rng);
+        assert!(subnet.contains(&ip));
+        assert!(ip.is_ipv6());
+    }
+
+    #[test]
+    fn test_generate_random_ip_in_single_host_v6() {
+        // /128 子网：单个主机
+        let subnet: IpNet = "2001:db8::1/128".parse().unwrap();
+        let mut rng = rand::thread_rng();
+
+        let ip = generate_random_ip_in_subnet(&subnet, &mut rng);
+        assert!(subnet.contains(&ip));
+        assert_eq!(ip, "2001:db8::1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_generate_random_ip_in_single_host_v4() {
+        // /32 子网：单个主机
+        let subnet: IpNet = "192.168.1.100/32".parse().unwrap();
+        let mut rng = rand::thread_rng();
+
+        let ip = generate_random_ip_in_subnet(&subnet, &mut rng);
+        assert!(subnet.contains(&ip));
+        assert_eq!(ip, "192.168.1.100".parse::<IpAddr>().unwrap());
     }
 }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 const TIMEOUT_SECS: u64 = 2;
@@ -37,10 +37,19 @@ impl ScanStats {
     }
 }
 
+/// 执行一次 IP 扫描
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `concurrency`: 并发扫描数
+///
+/// # 返回值
+/// 扫描统计信息
 pub async fn run_scan_once(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
-    semaphore: Arc<Semaphore>,
+    concurrency: usize,
 ) -> ScanStats {
     let mut root_cidrs = config.cidr_list.clone();
 
@@ -62,16 +71,17 @@ pub async fn run_scan_once(
     let stats = match config.scan_strategy.r#type {
         ScanStrategyType::FullScan => {
             info!("Starting full scan...");
-            run_full_scan(config, ip_manager, semaphore, &root_cidrs).await
+            run_full_scan(config, ip_manager, concurrency, &root_cidrs).await
         }
         ScanStrategyType::Adaptive => {
             info!("Starting adaptive scan...");
-            run_adaptive_scan(config, ip_manager, semaphore, &root_cidrs).await
+            let cfg = config;
+            run_adaptive_scan(cfg, ip_manager, concurrency, &root_cidrs).await
         }
     };
 
     info!(
-        "Scan complete: {} IPs scanned, {} success (rate: {:.2}%), {} subnets updated",
+        "Scan complete: {} scanned, {} success ({:.2}%), {} subnets",
         stats.total_scanned,
         stats.success_count,
         stats.success_rate() * 100.0,
@@ -84,17 +94,19 @@ pub async fn run_scan_once(
 async fn run_full_scan(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
-    semaphore: Arc<Semaphore>,
+    concurrency: usize,
     root_cidrs: &[IpNet],
 ) -> ScanStats {
-    let target_subnets = split_cidrs_to_subnets(root_cidrs, FOCUSED_SCAN_SUBNET_MASK);
+    let mask = FOCUSED_SCAN_SUBNET_MASK;
+    let target_subnets = split_cidrs_to_subnets(root_cidrs, mask);
     info!("Total target subnets to scan: {}", target_subnets.len());
 
-    let samples_per_subnet = config.scan_strategy.focused_samples_per_subnet;
-    let mut targets = Vec::with_capacity(target_subnets.len() * samples_per_subnet);
+    let samples = config.scan_strategy.focused_samples_per_subnet;
+    let capacity = target_subnets.len() * samples;
+    let mut targets = Vec::with_capacity(capacity);
     let mut rng = rand::thread_rng();
     for subnet in &target_subnets {
-        for _ in 0..samples_per_subnet {
+        for _ in 0..samples {
             let ip = generate_random_ip_in_subnet(subnet, &mut rng);
             targets.push((*subnet, ip));
         }
@@ -104,7 +116,7 @@ async fn run_full_scan(
     let subnet_results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
         Arc::new(Mutex::new(HashMap::with_capacity(target_subnets.len())));
 
-    let concurrency_limit = semaphore.available_permits().max(50);
+    let concurrency_limit = concurrency.max(50);
     info!("Scanning with concurrency limit: {}", concurrency_limit);
 
     let (success_count, total_scanned) = execute_scan_stream(
@@ -138,80 +150,19 @@ async fn run_full_scan(
 async fn run_adaptive_scan(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
-    semaphore: Arc<Semaphore>,
+    concurrency: usize,
     root_cidrs: &[IpNet],
 ) -> ScanStats {
-    let strategy = &config.scan_strategy;
-    let concurrency_limit = semaphore.available_permits().max(50);
+    let concurrency_limit = concurrency.max(50);
 
-    // Phase 1: Wide & Sparse Scan
-    info!("[Phase 1/3] Starting wide and sparse scan...");
-    let initial_subnets = split_cidrs_to_subnets(root_cidrs, strategy.initial_scan_mask);
-    info!(
-        "[Phase 1/3] Split into {} /{} subnets for initial scan.",
-        initial_subnets.len(),
-        strategy.initial_scan_mask
-    );
+    let (initial_success, initial_total, initial_results) =
+        run_initial_scan(&config, concurrency_limit, root_cidrs).await;
 
-    let mut initial_targets =
-        Vec::with_capacity(initial_subnets.len() * strategy.initial_samples_per_subnet);
-    let mut rng = rand::thread_rng();
-    for subnet in &initial_subnets {
-        for _ in 0..strategy.initial_samples_per_subnet {
-            let ip = generate_random_ip_in_subnet(subnet, &mut rng);
-            initial_targets.push((*subnet, ip));
-        }
-    }
-    info!(
-        "[Phase 1/3] Created {} scan targets.",
-        initial_targets.len()
-    );
-
-    let initial_results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
-        Arc::new(Mutex::new(HashMap::with_capacity(initial_subnets.len())));
-
-    let (initial_success, initial_total) = execute_scan_stream(
-        initial_targets,
-        concurrency_limit,
-        &config.trace_url,
-        initial_results.clone(),
+    let hot_spots = analyze_hot_spots(
+        initial_results,
+        config.scan_strategy.promising_subnet_percent,
     )
     .await;
-
-    info!(
-        "[Phase 1/3] Completed: {}/{} IPs successful.",
-        initial_success, initial_total
-    );
-
-    // Phase 2: Hot Spot Analysis
-    info!("[Phase 2/3] Starting hot spot analysis...");
-    let initial_scan_results = initial_results.lock().await;
-    let mut promising_subnets: Vec<SubnetQuality> = initial_scan_results
-        .iter()
-        .filter_map(|(subnet, samples)| {
-            if samples.is_empty() {
-                None
-            } else {
-                Some(SubnetQuality::new(*subnet, samples))
-            }
-        })
-        .collect();
-
-    promising_subnets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-
-    let top_k_count =
-        (promising_subnets.len() as f64 * strategy.promising_subnet_percent).ceil() as usize;
-    let hot_spots: Vec<IpNet> = promising_subnets
-        .into_iter()
-        .take(top_k_count)
-        .map(|q| q.subnet)
-        .collect();
-
-    info!(
-        "[Phase 2/3] Identified {} hot spots (top {}%) for focused scan.",
-        hot_spots.len(),
-        strategy.promising_subnet_percent * 100.0
-    );
 
     if hot_spots.is_empty() {
         warn!("No promising subnets found in phase 1. Aborting scan.");
@@ -222,62 +173,208 @@ async fn run_adaptive_scan(
         };
     }
 
-    // Phase 3: Focused Scan
-    info!("[Phase 3/3] Starting focused scan on hot spots...");
-    let focused_subnets = split_cidrs_to_subnets(&hot_spots, FOCUSED_SCAN_SUBNET_MASK);
-    info!(
-        "[Phase 3/3] Split hot spots into {} /{} subnets for focused scan.",
-        focused_subnets.len(),
-        FOCUSED_SCAN_SUBNET_MASK
-    );
+    let (focused_success, focused_total, focused_results) =
+        run_focused_scan(&config, concurrency_limit, &hot_spots).await;
 
-    let mut focused_targets =
-        Vec::with_capacity(focused_subnets.len() * strategy.focused_samples_per_subnet);
-    for subnet in &focused_subnets {
-        for _ in 0..strategy.focused_samples_per_subnet {
-            let ip = generate_random_ip_in_subnet(subnet, &mut rng);
-            focused_targets.push((*subnet, ip));
-        }
-    }
-    info!(
-        "[Phase 3/3] Created {} scan targets.",
-        focused_targets.len()
-    );
-
-    let focused_results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
-        Arc::new(Mutex::new(HashMap::with_capacity(focused_subnets.len())));
-
-    let (focused_success, focused_total) = execute_scan_stream(
-        focused_targets,
-        concurrency_limit,
-        &config.trace_url,
-        focused_results.clone(),
-    )
-    .await;
-
-    info!(
-        "[Phase 3/3] Completed: {}/{} IPs successful.",
-        focused_success, focused_total
-    );
-
-    // Phase 4: Aggregation & Persistence
-    let final_results = focused_results.lock().await;
-    let mut updated_subnets = 0;
-    for (subnet, samples) in final_results.iter() {
-        if !samples.is_empty() {
-            let quality = SubnetQuality::new(*subnet, samples);
-            ip_manager.update_subnet(quality);
-            updated_subnets += 1;
-        }
-    }
-
-    ip_manager.recalculate_best_subnets(config.selection_top_k_percent);
+    let top_k = config.selection_top_k_percent;
+    let mgr = &ip_manager;
+    let updated_subnets = aggregate_and_persist(focused_results, mgr, top_k).await;
 
     ScanStats {
         total_scanned: initial_total + focused_total,
         success_count: initial_success + focused_success,
         updated_subnets,
     }
+}
+
+/// 第一阶段：广域稀疏扫描
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `concurrency_limit`: 并发限制
+/// - `root_cidrs`: 根 CIDR 列表
+///
+/// # 返回值
+/// (成功数, 总数, 扫描结果)
+async fn run_initial_scan(
+    config: &AppConfig,
+    concurrency_limit: usize,
+    root_cidrs: &[IpNet],
+) -> (usize, usize, Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>) {
+    let strategy = &config.scan_strategy;
+
+    info!("[Phase 1/3] Starting wide and sparse scan...");
+    let mask = strategy.initial_scan_mask;
+    let subnets = split_cidrs_to_subnets(root_cidrs, mask);
+    info!(
+        "[Phase 1/3] Split into {} /{} subnets.",
+        subnets.len(),
+        mask
+    );
+
+    let samples = strategy.initial_samples_per_subnet;
+    let targets = generate_scan_targets(&subnets, samples);
+    info!("[Phase 1/3] Created {} scan targets.", targets.len());
+
+    let results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
+        Arc::new(Mutex::new(HashMap::with_capacity(subnets.len())));
+
+    let (success, total) = execute_scan_stream(
+        targets,
+        concurrency_limit,
+        &config.trace_url,
+        results.clone(),
+    )
+    .await;
+
+    info!(
+        "[Phase 1/3] Completed: {}/{} IPs successful.",
+        success, total
+    );
+
+    (success, total, results)
+}
+
+/// 第二阶段：热点分析
+///
+/// # 参数
+/// - `initial_results`: 初始扫描结果
+/// - `promising_percent`: 热点筛选比例
+///
+/// # 返回值
+/// 热点子网列表
+async fn analyze_hot_spots(
+    initial_results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
+    promising_percent: f64,
+) -> Vec<IpNet> {
+    info!("[Phase 2/3] Starting hot spot analysis...");
+
+    let results = initial_results.lock().await;
+    let mut promising: Vec<SubnetQuality> = results
+        .iter()
+        .filter_map(|(subnet, samples)| {
+            if samples.is_empty() {
+                return None;
+            }
+            Some(SubnetQuality::new(*subnet, samples))
+        })
+        .collect();
+
+    promising.sort_by(|a, b| b.score.total_cmp(&a.score));
+
+    let top_k = (promising.len() as f64 * promising_percent).ceil() as usize;
+    let hot_spots: Vec<IpNet> = promising
+        .into_iter()
+        .take(top_k)
+        .map(|q| q.subnet)
+        .collect();
+
+    info!(
+        "[Phase 2/3] Identified {} hot spots (top {}%).",
+        hot_spots.len(),
+        promising_percent * 100.0
+    );
+
+    hot_spots
+}
+
+/// 第三阶段：精细扫描
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `concurrency_limit`: 并发限制
+/// - `hot_spots`: 热点子网列表
+///
+/// # 返回值
+/// (成功数, 总数, 扫描结果)
+async fn run_focused_scan(
+    config: &AppConfig,
+    concurrency_limit: usize,
+    hot_spots: &[IpNet],
+) -> (usize, usize, Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>) {
+    let strategy = &config.scan_strategy;
+
+    info!("[Phase 3/3] Starting focused scan on hot spots...");
+    let subnets = split_cidrs_to_subnets(hot_spots, FOCUSED_SCAN_SUBNET_MASK);
+    info!(
+        "[Phase 3/3] Split into {} /{} subnets.",
+        subnets.len(),
+        FOCUSED_SCAN_SUBNET_MASK
+    );
+
+    let samples = strategy.focused_samples_per_subnet;
+    let targets = generate_scan_targets(&subnets, samples);
+    info!("[Phase 3/3] Created {} scan targets.", targets.len());
+
+    let results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
+        Arc::new(Mutex::new(HashMap::with_capacity(subnets.len())));
+
+    let (success, total) = execute_scan_stream(
+        targets,
+        concurrency_limit,
+        &config.trace_url,
+        results.clone(),
+    )
+    .await;
+
+    info!(
+        "[Phase 3/3] Completed: {}/{} IPs successful.",
+        success, total
+    );
+
+    (success, total, results)
+}
+
+/// 第四阶段：聚合与持久化
+///
+/// # 参数
+/// - `results`: 扫描结果
+/// - `ip_manager`: IP 管理器
+/// - `top_k_percent`: 最佳子网筛选比例
+///
+/// # 返回值
+/// 更新的子网数量
+async fn aggregate_and_persist(
+    results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
+    ip_manager: &IpManager,
+    top_k_percent: f64,
+) -> usize {
+    let guard = results.lock().await;
+    let mut updated = 0;
+
+    for (subnet, samples) in guard.iter() {
+        if samples.is_empty() {
+            continue;
+        }
+        let quality = SubnetQuality::new(*subnet, samples);
+        ip_manager.update_subnet(quality);
+        updated += 1;
+    }
+
+    ip_manager.recalculate_best_subnets(top_k_percent);
+    updated
+}
+
+/// 生成扫描目标
+///
+/// # 参数
+/// - `subnets`: 子网列表
+/// - `samples`: 每个子网的采样数
+///
+/// # 返回值
+/// (子网, IP) 元组列表
+fn generate_scan_targets(subnets: &[IpNet], samples: usize) -> Vec<(IpNet, IpAddr)> {
+    let mut targets = Vec::with_capacity(subnets.len() * samples);
+    let mut rng = rand::thread_rng();
+
+    for subnet in subnets {
+        for _ in 0..samples {
+            let ip = generate_random_ip_in_subnet(subnet, &mut rng);
+            targets.push((*subnet, ip));
+        }
+    }
+
+    targets
 }
 
 async fn execute_scan_stream(
@@ -295,9 +392,11 @@ async fn execute_scan_stream(
     }
 
     let pb = ProgressBar::new(targets.len() as u64);
+    let tpl = "{spinner:.green} [{elapsed_precise}] \
+        [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}";
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+            .template(tpl)
             .unwrap()
             .progress_chars("#>-"),
     );
@@ -346,7 +445,8 @@ async fn execute_scan_stream(
         }
     }
 
-    pb.finish_with_message(format!("Scan complete. Found {} valid IPs.", success_count));
+    let msg = format!("Scan complete. Found {} valid IPs.", success_count);
+    pb.finish_with_message(msg);
 
     (success_count, total_scanned)
 }
@@ -395,7 +495,8 @@ async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs")))
+    let err = last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
+    Err(err)
 }
 
 fn parse_cidr_list(text: &str) -> Vec<IpNet> {
@@ -479,10 +580,10 @@ async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
 
 fn calculate_average(values: &[u128]) -> u128 {
     if values.is_empty() {
-        0
-    } else {
-        values.iter().sum::<u128>() / values.len() as u128
+        return 0;
     }
+    let sum = values.iter().fold(0u128, |acc, &v| acc.saturating_add(v));
+    sum / values.len() as u128
 }
 
 fn calculate_jitter(latencies: &[u128]) -> u128 {

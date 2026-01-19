@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::state::IpManager;
 use futures::stream::{FuturesUnordered, StreamExt};
+use socket2::{SockRef, TcpKeepalive};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +19,10 @@ const SELECTION_TIMEOUT_MS: u64 = 2000;
 const FALLBACK_TIMEOUT_SECS: u64 = 5;
 /// 缓冲区大小 64KB
 const BUFFER_SIZE: usize = 65536;
+/// TCP Keepalive 空闲时间（秒）
+const KEEPALIVE_TIME_SECS: u64 = 60;
+/// TCP Keepalive 探测间隔（秒）
+const KEEPALIVE_INTERVAL_SECS: u64 = 10;
 
 /// 启动 TCP 转发服务器
 pub async fn start_server(
@@ -49,8 +54,18 @@ pub async fn start_server(
                         let ip_manager = ip_manager.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(client_stream, client_addr, config, ip_manager).await {
-                                debug!("Connection handling error for {}: {}", client_addr, e);
+                            let result = handle_connection(
+                                client_stream,
+                                client_addr,
+                                config,
+                                ip_manager,
+                            )
+                            .await;
+                            if let Err(e) = result {
+                                debug!(
+                                    "Connection handling error for {}: {}",
+                                    client_addr, e
+                                );
                             }
                         });
                     }
@@ -88,7 +103,7 @@ async fn handle_connection(
 
     if candidate_ips.is_empty() {
         error!(
-            "No available IPs for concurrent connection (strategy: top {}% subnets -> {} subnets -> {} IPs)",
+            "No available IPs (strategy: top {}% -> {} subnets -> {} IPs)",
             config.selection_top_k_percent * 100.0,
             config.selection_random_n_subnets,
             config.selection_random_m_ips
@@ -103,22 +118,21 @@ async fn handle_connection(
     );
 
     // 尝试并发连接
-    let mut remote_stream = match race_connections(&candidate_ips, config.target_port).await {
+    let race_result = race_connections(&candidate_ips, config.target_port).await;
+    let mut remote_stream = match race_result {
         Some(result) => {
             info!(
-                "Using fastest connection to {} for client {} (established in {:?})",
+                "Fastest connection: {} for {} ({:?})",
                 result.ip, client_addr, result.connect_time
             );
             result.stream
         }
         None => {
-            warn!(
-                "All concurrent connections failed for {}, falling back to single connection attempt",
-                client_addr
-            );
+            warn!("All connections failed for {}, falling back", client_addr);
 
             // 回退：使用更长的超时时间尝试单个连接
-            let fallback_ips = ip_manager.get_target_ips(&config.target_colos, 1, 1);
+            let target_colos = &config.target_colos;
+            let fallback_ips = ip_manager.get_target_ips(target_colos, 1, 1);
 
             if fallback_ips.is_empty() {
                 error!("No available IPs for fallback connection");
@@ -171,7 +185,7 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
     for &ip in candidate_ips {
         let target_addr = SocketAddr::new(ip, target_port);
         let cancel_clone = cancel_token.clone();
-        
+
         tasks.push(async move {
             tokio::select! {
                 _ = cancel_clone.cancelled() => {
@@ -188,8 +202,8 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
 
                     match connect_result {
                         Ok(Ok(stream)) => {
-                            // 优化 socket
                             let _ = stream.set_nodelay(true);
+                            let _ = configure_keepalive(&stream);
                             Some(ConnectionResult {
                                 stream,
                                 ip,
@@ -238,6 +252,7 @@ async fn connect_with_fallback(ip: IpAddr, port: u16) -> anyhow::Result<TcpStrea
     {
         Ok(Ok(stream)) => {
             let _ = stream.set_nodelay(true);
+            let _ = configure_keepalive(&stream);
             Ok(stream)
         }
         Ok(Err(e)) => {
@@ -252,4 +267,12 @@ async fn connect_with_fallback(ip: IpAddr, port: u16) -> anyhow::Result<TcpStrea
             Err(anyhow::anyhow!("Connection timeout"))
         }
     }
+}
+
+fn configure_keepalive(stream: &TcpStream) -> std::io::Result<()> {
+    let socket_ref = SockRef::from(stream);
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(KEEPALIVE_TIME_SECS))
+        .with_interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
+    socket_ref.set_tcp_keepalive(&keepalive)
 }
