@@ -36,6 +36,62 @@ pub enum ConfigError {
 
     #[error("promising_subnet_percent must be between 0 and 1, got {0}")]
     InvalidPromisingSubnetPercent(f64),
+
+    #[error("background_scan interval_secs must be >= 60")]
+    InvalidBgScanInterval,
+
+    #[error("background_scan concurrency must be > 0")]
+    InvalidBgScanConcurrency,
+}
+
+/// 后台定时扫描配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundScanConfig {
+    /// 是否启用后台定时扫描
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 扫描间隔（秒），最小 60 秒
+    #[serde(default = "default_bg_scan_interval")]
+    pub interval_secs: u64,
+
+    /// 后台扫描并发数
+    #[serde(default = "default_bg_scan_concurrency")]
+    pub concurrency: usize,
+}
+
+fn default_bg_scan_interval() -> u64 {
+    3600
+}
+
+fn default_bg_scan_concurrency() -> usize {
+    100
+}
+
+impl Default for BackgroundScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_bg_scan_interval(),
+            concurrency: default_bg_scan_concurrency(),
+        }
+    }
+}
+
+impl BackgroundScanConfig {
+    /// 验证后台扫描配置
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.interval_secs < 60 {
+            return Err(ConfigError::InvalidBgScanInterval.into());
+        }
+        if self.concurrency == 0 {
+            return Err(ConfigError::InvalidBgScanConcurrency.into());
+        }
+        Ok(())
+    }
 }
 
 /// 扫描策略类型
@@ -164,6 +220,10 @@ pub struct AppConfig {
     /// 扫描策略配置
     #[serde(default)]
     pub scan_strategy: ScanStrategyConfig,
+
+    /// 后台定时扫描配置
+    #[serde(default)]
+    pub background_scan: BackgroundScanConfig,
 }
 
 fn default_top_k_percent() -> f64 {
@@ -196,6 +256,7 @@ impl Default for AppConfig {
             selection_random_n_subnets: default_n_subnets(),
             selection_random_m_ips: default_m_ips(),
             scan_strategy: ScanStrategyConfig::default(),
+            background_scan: BackgroundScanConfig::default(),
         }
     }
 }
@@ -256,6 +317,7 @@ impl AppConfig {
         }
 
         self.scan_strategy.validate()?;
+        self.background_scan.validate()?;
 
         Ok(())
     }
@@ -319,6 +381,30 @@ mod tests {
         config.scan_strategy.promising_subnet_percent = 0.0;
         assert!(config.validate().is_err());
         config.scan_strategy.promising_subnet_percent = 1.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_background_scan_config_validation() {
+        let mut config = AppConfig::default();
+
+        // 禁用时不验证
+        config.background_scan.enabled = false;
+        config.background_scan.interval_secs = 0;
+        assert!(config.validate().is_ok());
+
+        // 启用时验证间隔
+        config.background_scan.enabled = true;
+        config.background_scan.interval_secs = 59;
+        config.background_scan.concurrency = 100;
+        assert!(config.validate().is_err());
+
+        // 合法间隔
+        config.background_scan.interval_secs = 60;
+        assert!(config.validate().is_ok());
+
+        // 并发数为 0
+        config.background_scan.concurrency = 0;
         assert!(config.validate().is_err());
     }
 }

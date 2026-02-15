@@ -10,7 +10,7 @@ mod web;
 use std::sync::Arc;
 
 use config::AppConfig;
-use scanner::run_scan_once;
+use scanner::{run_background_scan, run_scan_once};
 use server::start_server;
 use state::IpManager;
 
@@ -27,14 +27,22 @@ fn print_help() {
     tcp-forwarder-rust [选项]
 
 选项:
-    --scan          运行扫描模式，扫描优选 IP 段
-    --rank-colos    显示数据中心质量排名
-    --help, -h      显示此帮助信息
+    --scan            运行扫描模式，扫描优选 IP 段
+    --scan-on-start   转发模式启动时立即执行一次扫描
+    --rank-colos      显示数据中心质量排名
+    --help, -h        显示此帮助信息
+
+说明:
+    后台定时扫描通过 config.json 中的
+    background_scan 配置块控制。
+    --scan-on-start 仅在转发模式下生效，
+    启动时立即执行一次扫描后再进入定时循环。
 
 示例:
-    tcp-forwarder-rust --scan       # 扫描优选 IP
-    tcp-forwarder-rust --rank-colos # 查看数据中心排名
-    tcp-forwarder-rust              # 启动转发服务
+    tcp-forwarder-rust --scan            # 扫描优选 IP
+    tcp-forwarder-rust --rank-colos      # 查看排名
+    tcp-forwarder-rust                   # 启动转发
+    tcp-forwarder-rust --scan-on-start   # 转发+立即扫描
 "#
     );
 }
@@ -43,6 +51,7 @@ fn print_help() {
 #[derive(Debug, Default)]
 struct CliArgs {
     scan: bool,
+    scan_on_start: bool,
     rank_colos: bool,
     help: bool,
 }
@@ -58,6 +67,7 @@ fn parse_args() -> CliArgs {
     for arg in args.iter().skip(1) {
         match arg.as_str() {
             "--scan" => cli_args.scan = true,
+            "--scan-on-start" => cli_args.scan_on_start = true,
             "--rank-colos" => cli_args.rank_colos = true,
             "--help" | "-h" => cli_args.help = true,
             _ => {
@@ -125,20 +135,28 @@ async fn run_scan_mode(config: Arc<AppConfig>, ip_manager: IpManager) {
 /// # 参数
 /// - `server_handle`: 服务器任务句柄
 /// - `web_handle`: Web 服务任务句柄
+/// - `scan_handle`: 后台扫描任务句柄（可选）
 async fn graceful_shutdown(
     server_handle: tokio::task::JoinHandle<()>,
     web_handle: tokio::task::JoinHandle<()>,
+    scan_handle: Option<tokio::task::JoinHandle<()>>,
 ) {
-    let shutdown_timeout = tokio::time::Duration::from_secs(10);
+    let shutdown_timeout =
+        tokio::time::Duration::from_secs(10);
     tokio::select! {
         _ = async {
             let _ = server_handle.await;
             let _ = web_handle.await;
+            if let Some(h) = scan_handle {
+                let _ = h.await;
+            }
         } => {
             info!("All services shut down gracefully");
         }
         _ = tokio::time::sleep(shutdown_timeout) => {
-            warn!("Shutdown timeout reached, forcing exit");
+            warn!(
+                "Shutdown timeout reached, forcing exit"
+            );
         }
     }
 }
@@ -148,32 +166,79 @@ async fn graceful_shutdown(
 /// # 参数
 /// - `config`: 应用配置
 /// - `ip_manager`: IP 管理器
-async fn run_forward_mode(config: Arc<AppConfig>, ip_manager: IpManager) {
-    // 创建取消令牌用于优雅关闭
+/// - `scan_on_start`: 是否启动时立即扫描
+async fn run_forward_mode(
+    config: Arc<AppConfig>,
+    ip_manager: IpManager,
+    scan_on_start: bool,
+) {
     let cancel_token = CancellationToken::new();
 
-    // 启动 TCP 转发服务器
     let server_handle = tokio::spawn(start_server(
         config.clone(),
         ip_manager.clone(),
         cancel_token.clone(),
     ));
 
-    // 启动 Web 服务器
     let web_handle = tokio::spawn(start_web_server(
         config.clone(),
         ip_manager.clone(),
         cancel_token.clone(),
     ));
 
-    // 等待关闭信号
-    let _ = tokio::signal::ctrl_c().await;
-    info!("Received Ctrl+C, initiating graceful shutdown...");
+    let scan_handle = spawn_background_scan(
+        &config,
+        &ip_manager,
+        &cancel_token,
+        scan_on_start,
+    );
 
-    // 发送取消信号
+    let _ = tokio::signal::ctrl_c().await;
+    info!(
+        "Received Ctrl+C, initiating graceful shutdown..."
+    );
+
     cancel_token.cancel();
 
-    graceful_shutdown(server_handle, web_handle).await;
+    graceful_shutdown(
+        server_handle,
+        web_handle,
+        scan_handle,
+    )
+    .await;
+}
+
+/// 启动后台扫描任务（如果配置启用）
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `cancel_token`: 取消令牌
+/// - `scan_on_start`: 是否启动时立即扫描
+///
+/// # 返回值
+/// 后台任务句柄（如果启用）
+fn spawn_background_scan(
+    config: &Arc<AppConfig>,
+    ip_manager: &IpManager,
+    cancel_token: &CancellationToken,
+    scan_on_start: bool,
+) -> Option<tokio::task::JoinHandle<()>> {
+    // 允许 CLI 参数覆盖配置文件
+    if !config.background_scan.enabled && !scan_on_start {
+        return None;
+    }
+    
+    if scan_on_start && !config.background_scan.enabled {
+        info!("CLI --scan-on-start forced background scan ON");
+    }
+
+    Some(tokio::spawn(run_background_scan(
+        config.clone(),
+        ip_manager.clone(),
+        cancel_token.clone(),
+        scan_on_start,
+    )))
 }
 
 #[tokio::main]
@@ -215,6 +280,11 @@ async fn main() {
         return;
     }
 
-    run_forward_mode(config, ip_manager).await;
+    run_forward_mode(
+        config,
+        ip_manager,
+        cli_args.scan_on_start,
+    )
+    .await;
     info!("TCP Forwarder stopped");
 }

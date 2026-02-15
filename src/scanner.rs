@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 
 const TIMEOUT_SECS: u64 = 2;
 const PROBE_COUNT: usize = 5;
@@ -719,6 +720,113 @@ fn calculate_jitter(latencies: &[u128]) -> u128 {
 fn parse_colo(body: &str) -> Option<String> {
     body.lines()
         .find_map(|line| line.strip_prefix("colo=").map(|s| s.to_string()))
+}
+
+/// 执行一轮后台扫描并持久化结果
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+///
+/// # 返回值
+/// 扫描统计信息
+async fn run_and_persist(
+    config: &Arc<AppConfig>,
+    ip_manager: &IpManager,
+) -> ScanStats {
+    let concurrency = config.background_scan.concurrency;
+    let stats = run_scan_once(
+        config.clone(),
+        ip_manager.clone(),
+        concurrency,
+    )
+    .await;
+
+    // 使用 spawn_blocking 避免阻塞 async 线程
+    let manager = ip_manager.clone();
+    let path = config.ip_store_file.clone();
+    
+    let save_result = tokio::task::spawn_blocking(move || {
+        manager.save_to_file(&path)
+    })
+    .await;
+
+    match save_result {
+        Ok(Ok(_)) => info!(
+            "Background scan saved to {}",
+            config.ip_store_file
+        ),
+        Ok(Err(e)) => error!(
+            "Failed to save background scan: {}",
+            e
+        ),
+        Err(e) => error!(
+            "Failed to join save task: {}",
+            e
+        ),
+    }
+
+    stats
+}
+
+/// 后台定时扫描主循环
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `cancel_token`: 取消令牌
+/// - `scan_on_start`: 是否启动时立即扫描
+pub async fn run_background_scan(
+    config: Arc<AppConfig>,
+    ip_manager: IpManager,
+    cancel_token: CancellationToken,
+    scan_on_start: bool,
+) {
+    let interval = Duration::from_secs(
+        config.background_scan.interval_secs,
+    );
+
+    info!(
+        "Background scan enabled \
+         (interval={}s, concurrency={}, scan_on_start={})",
+        config.background_scan.interval_secs,
+        config.background_scan.concurrency,
+        scan_on_start,
+    );
+
+    if scan_on_start {
+        info!("Running initial background scan...");
+        let stats = run_and_persist(
+            &config, &ip_manager,
+        ).await;
+        info!(
+            "Initial scan done: {} scanned, {} ok",
+            stats.total_scanned,
+            stats.success_count,
+        );
+    }
+
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                info!("Background scan received shutdown");
+                break;
+            }
+            _ = tokio::time::sleep(interval) => {
+                info!("Starting scheduled background scan...");
+                let stats = run_and_persist(
+                    &config, &ip_manager,
+                ).await;
+                info!(
+                    "Scheduled scan done: {} scanned, {} ok",
+                    stats.total_scanned,
+                    stats.success_count,
+                );
+            }
+        }
+    }
+
+    info!("Background scan stopped");
 }
 
 #[cfg(test)]
