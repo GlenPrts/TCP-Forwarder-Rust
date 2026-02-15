@@ -24,34 +24,34 @@ impl ColoStats {
 
     fn avg_score(&self) -> f32 {
         if self.count == 0 {
-            0.0
-        } else {
-            self.total_score / self.count as f32
+            return 0.0;
         }
+        self.total_score / self.count as f32
     }
 
     fn avg_latency(&self) -> u64 {
         if self.count == 0 {
-            0
-        } else {
-            self.total_latency / self.count as u64
+            return 0;
         }
+        self.total_latency
+            .checked_div(self.count as u64)
+            .unwrap_or(0)
     }
 
     fn avg_jitter(&self) -> u64 {
         if self.count == 0 {
-            0
-        } else {
-            self.total_jitter / self.count as u64
+            return 0;
         }
+        self.total_jitter
+            .checked_div(self.count as u64)
+            .unwrap_or(0)
     }
 
     fn avg_loss_rate(&self) -> f32 {
         if self.count == 0 {
-            0.0
-        } else {
-            self.total_loss_rate / self.count as f32
+            return 0.0;
         }
+        self.total_loss_rate / self.count as f32
     }
 }
 

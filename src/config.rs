@@ -248,15 +248,6 @@ impl AppConfig {
             return Err(ConfigError::EmptyIpStoreFile.into());
         }
 
-        // 验证监听地址格式
-        if let Err(e) = self.bind_addr.to_string().parse::<std::net::SocketAddr>() {
-            return Err(anyhow::anyhow!("Invalid bind_addr: {}", e));
-        }
-
-        if let Err(e) = self.web_addr.to_string().parse::<std::net::SocketAddr>() {
-            return Err(anyhow::anyhow!("Invalid web_addr: {}", e));
-        }
-
         // 验证 ASN URL（如果提供）
         if !self.asn_url.is_empty() {
             if let Err(e) = reqwest::Url::parse(&self.asn_url) {

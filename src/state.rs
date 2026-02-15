@@ -92,21 +92,7 @@ impl IpManager {
             return Vec::new();
         }
 
-        // 按 colo 过滤
-        let candidates: Vec<IpNet> = if target_colos.is_empty() {
-            best_subnets.clone()
-        } else {
-            best_subnets
-                .iter()
-                .filter(|&subnet| {
-                    self.subnets
-                        .get(subnet)
-                        .map(|entry| target_colos.contains(&entry.value().colo))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect()
-        };
+        let candidates = self.filter_subnets_by_colo(&best_subnets, target_colos);
 
         if candidates.is_empty() {
             debug!("No candidates after colo filtering");
@@ -114,22 +100,50 @@ impl IpManager {
         }
 
         let mut rng = rand::thread_rng();
+        let selected_subnets = self.select_subnets(&candidates, n_subnets, &mut rng);
 
-        // 随机选择 n 个子网
-        let selected_subnets: Vec<IpNet> = if candidates.len() <= n_subnets {
-            candidates
-        } else {
-            candidates
-                .choose_multiple(&mut rng, n_subnets)
-                .cloned()
-                .collect()
-        };
+        self.generate_ips_from_subnets(&selected_subnets, m_ips, &mut rng)
+    }
 
-        // 为每个子网生成 m 个 IP
-        let mut target_ips = Vec::with_capacity(selected_subnets.len() * m_ips);
-        for subnet in selected_subnets {
+    /// 按 Colo 过滤子网
+    fn filter_subnets_by_colo(&self, subnets: &[IpNet], target_colos: &[String]) -> Vec<IpNet> {
+        if target_colos.is_empty() {
+            return subnets.to_vec();
+        }
+
+        let target_colo_set: std::collections::HashSet<_> = target_colos.iter().collect();
+
+        subnets
+            .iter()
+            .filter(|&subnet| {
+                self.subnets
+                    .get(subnet)
+                    .map(|entry| target_colo_set.contains(&entry.value().colo))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// 随机选择子网
+    fn select_subnets(&self, candidates: &[IpNet], n: usize, rng: &mut impl Rng) -> Vec<IpNet> {
+        if candidates.len() <= n {
+            return candidates.to_vec();
+        }
+        candidates.choose_multiple(rng, n).cloned().collect()
+    }
+
+    /// 从子网生成 IP
+    fn generate_ips_from_subnets(
+        &self,
+        subnets: &[IpNet],
+        m_ips: usize,
+        rng: &mut impl Rng,
+    ) -> Vec<IpAddr> {
+        let mut target_ips = Vec::with_capacity(subnets.len() * m_ips);
+        for subnet in subnets {
             for _ in 0..m_ips {
-                target_ips.push(generate_random_ip_in_subnet(&subnet, &mut rng));
+                target_ips.push(generate_random_ip_in_subnet(subnet, rng));
             }
         }
 
@@ -178,6 +192,8 @@ impl IpManager {
 }
 
 /// 计算 top K 的数量
+///
+/// 根据总数和百分比计算需要保留的数量
 fn calculate_top_k(total: usize, percent: f64) -> usize {
     let k = (total as f64 * percent).ceil() as usize;
     k.clamp(1, total)

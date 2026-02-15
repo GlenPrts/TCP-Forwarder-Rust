@@ -46,17 +46,25 @@ impl SubnetQuality {
         }
 
         let sample_count = samples.len();
+        let count_u64 = sample_count as u64;
+        let count_f32 = sample_count as f32;
 
         // 计算平均值
-        let avg_latency = (samples.iter().map(|s| s.latency).sum::<u64>()) / sample_count as u64;
-        let avg_jitter = (samples.iter().map(|s| s.jitter).sum::<u64>()) / sample_count as u64;
-        let avg_loss_rate = samples.iter().map(|s| s.loss_rate).sum::<f32>() / sample_count as f32;
+        let sum_latency: u64 = samples.iter().map(|s| s.latency).sum();
+        let avg_latency = sum_latency.checked_div(count_u64).unwrap_or(0);
+
+        let sum_jitter: u64 = samples.iter().map(|s| s.jitter).sum();
+        let avg_jitter = sum_jitter.checked_div(count_u64).unwrap_or(0);
+
+        let sum_loss: f32 = samples.iter().map(|s| s.loss_rate).sum();
+        let avg_loss_rate = sum_loss / count_f32;
 
         // 确定主要的 colo（使用众数）
         let colo = determine_primary_colo(samples);
 
         // 计算平均评分
-        let avg_score = samples.iter().map(|s| s.score).sum::<f32>() / sample_count as f32;
+        let sum_score: f32 = samples.iter().map(|s| s.score).sum();
+        let avg_score = sum_score / count_f32;
 
         Self {
             subnet,
@@ -156,7 +164,8 @@ impl IpQuality {
         let score = (BASE_SCORE - latency_penalty - jitter_penalty - loss_penalty).max(0.0);
 
         debug!(
-            "IP {} score: base={}, latency_penalty={:.2}, jitter_penalty={:.2}, loss_penalty={:.2}, final={:.2}",
+            "IP {} score: base={}, latency_p={:.2}, jitter_p={:.2}, \
+             loss_p={:.2}, final={:.2}",
             self.ip, BASE_SCORE, latency_penalty, jitter_penalty, loss_penalty, score
         );
 

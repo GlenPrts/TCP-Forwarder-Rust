@@ -8,45 +8,47 @@ use std::net::IpAddr;
 /// 对于 IPv6，会避开网络地址（对于 /128 或 /127 子网除外）
 pub fn generate_random_ip_in_subnet(subnet: &IpNet, rng: &mut impl Rng) -> IpAddr {
     match subnet {
-        IpNet::V4(net) => {
-            let start: u32 = net.network().into();
-            let end: u32 = net.broadcast().into();
-
-            // 对于 /31 和 /32 子网，直接使用整个范围
-            // 对于更大的子网，避开网络地址和广播地址
-            let (effective_start, effective_end) = if end - start >= 2 {
-                (start + 1, end - 1)
-            } else {
-                (start, end)
-            };
-
-            let ip_u32 = if effective_start <= effective_end {
-                rng.gen_range(effective_start..=effective_end)
-            } else {
-                effective_start
-            };
-            IpAddr::V4(std::net::Ipv4Addr::from(ip_u32))
-        }
-        IpNet::V6(net) => {
-            let start: u128 = net.network().into();
-            let end: u128 = net.broadcast().into();
-
-            // 对于 /128 和 /127 子网，直接使用整个范围
-            // 对于更大的子网，避开网络地址
-            let (effective_start, effective_end) = if end - start >= 2 {
-                (start + 1, end - 1)
-            } else {
-                (start, end)
-            };
-
-            let ip_u128 = if effective_start <= effective_end {
-                rng.gen_range(effective_start..=effective_end)
-            } else {
-                effective_start
-            };
-            IpAddr::V6(std::net::Ipv6Addr::from(ip_u128))
-        }
+        IpNet::V4(net) => generate_v4_ip(net, rng),
+        IpNet::V6(net) => generate_v6_ip(net, rng),
     }
+}
+
+/// 生成 IPv4 地址
+fn generate_v4_ip(net: &ipnet::Ipv4Net, rng: &mut impl Rng) -> IpAddr {
+    let start: u32 = net.network().into();
+    let end: u32 = net.broadcast().into();
+
+    // 对于 /31 和 /32 子网，直接使用整个范围
+    if end - start < 2 {
+        let ip_u32 = rng.gen_range(start..=end);
+        return IpAddr::V4(std::net::Ipv4Addr::from(ip_u32));
+    }
+
+    // 对于更大的子网，避开网络地址和广播地址
+    let effective_start = start + 1;
+    let effective_end = end - 1;
+
+    let ip_u32 = rng.gen_range(effective_start..=effective_end);
+    IpAddr::V4(std::net::Ipv4Addr::from(ip_u32))
+}
+
+/// 生成 IPv6 地址
+fn generate_v6_ip(net: &ipnet::Ipv6Net, rng: &mut impl Rng) -> IpAddr {
+    let start: u128 = net.network().into();
+    let end: u128 = net.broadcast().into();
+
+    // 对于 /128 和 /127 子网，直接使用整个范围
+    if end - start < 2 {
+        let ip_u128 = rng.gen_range(start..=end);
+        return IpAddr::V6(std::net::Ipv6Addr::from(ip_u128));
+    }
+
+    // 对于更大的子网，避开网络地址
+    let effective_start = start + 1;
+    let effective_end = end - 1;
+
+    let ip_u128 = rng.gen_range(effective_start..=effective_end);
+    IpAddr::V6(std::net::Ipv6Addr::from(ip_u128))
 }
 
 #[cfg(test)]

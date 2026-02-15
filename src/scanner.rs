@@ -6,12 +6,12 @@ use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use ipnet::IpNet;
+use parking_lot::Mutex;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 const TIMEOUT_SECS: u64 = 2;
@@ -30,10 +30,9 @@ pub struct ScanStats {
 impl ScanStats {
     pub fn success_rate(&self) -> f64 {
         if self.total_scanned == 0 {
-            0.0
-        } else {
-            self.success_count as f64 / self.total_scanned as f64
+            return 0.0;
         }
+        self.success_count as f64 / self.total_scanned as f64
     }
 }
 
@@ -91,6 +90,16 @@ pub async fn run_scan_once(
     stats
 }
 
+/// 执行全量扫描
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `concurrency`: 并发数
+/// - `root_cidrs`: 根 CIDR 列表
+///
+/// # 返回值
+/// 扫描统计信息
 async fn run_full_scan(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
@@ -102,43 +111,29 @@ async fn run_full_scan(
     info!("Total target subnets to scan: {}", target_subnets.len());
 
     let samples = config.scan_strategy.focused_samples_per_subnet;
-    let capacity = target_subnets.len() * samples;
-    let mut targets = Vec::with_capacity(capacity);
-    let mut rng = rand::thread_rng();
-    for subnet in &target_subnets {
-        for _ in 0..samples {
-            let ip = generate_random_ip_in_subnet(subnet, &mut rng);
-            targets.push((*subnet, ip));
-        }
-    }
+    let targets = generate_scan_targets(&target_subnets, samples);
     info!("Created {} scan targets", targets.len());
 
     let subnet_results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
         Arc::new(Mutex::new(HashMap::with_capacity(target_subnets.len())));
 
-    let concurrency_limit = concurrency.max(50);
-    info!("Scanning with concurrency limit: {}", concurrency_limit);
+    // 保证最低并发数为 50
+    let effective_concurrency = concurrency.max(50);
+    info!("Scanning with concurrency limit: {}", effective_concurrency);
 
     let (success_count, total_scanned) = execute_scan_stream(
         targets,
-        concurrency_limit,
+        effective_concurrency,
         &config.trace_url,
         subnet_results.clone(),
     )
     .await;
 
-    let results = subnet_results.lock().await;
-    let mut updated_subnets = 0;
-
-    for (subnet, samples) in results.iter() {
-        if !samples.is_empty() {
-            let quality = SubnetQuality::new(*subnet, samples);
-            ip_manager.update_subnet(quality);
-            updated_subnets += 1;
-        }
-    }
-
-    ip_manager.recalculate_best_subnets(config.selection_top_k_percent);
+    let updated_subnets = aggregate_and_persist(
+        subnet_results,
+        &ip_manager,
+        config.selection_top_k_percent,
+    );
 
     ScanStats {
         total_scanned,
@@ -147,22 +142,32 @@ async fn run_full_scan(
     }
 }
 
+/// 执行自适应扫描
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `concurrency`: 并发数
+/// - `root_cidrs`: 根 CIDR 列表
+///
+/// # 返回值
+/// 扫描统计信息
 async fn run_adaptive_scan(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
     concurrency: usize,
     root_cidrs: &[IpNet],
 ) -> ScanStats {
-    let concurrency_limit = concurrency.max(50);
+    // 保证最低并发数为 50
+    let effective_concurrency = concurrency.max(50);
 
     let (initial_success, initial_total, initial_results) =
-        run_initial_scan(&config, concurrency_limit, root_cidrs).await;
+        run_initial_scan(&config, effective_concurrency, root_cidrs).await;
 
     let hot_spots = analyze_hot_spots(
         initial_results,
         config.scan_strategy.promising_subnet_percent,
-    )
-    .await;
+    );
 
     if hot_spots.is_empty() {
         warn!("No promising subnets found in phase 1. Aborting scan.");
@@ -174,11 +179,11 @@ async fn run_adaptive_scan(
     }
 
     let (focused_success, focused_total, focused_results) =
-        run_focused_scan(&config, concurrency_limit, &hot_spots).await;
+        run_focused_scan(&config, effective_concurrency, &hot_spots).await;
 
     let top_k = config.selection_top_k_percent;
-    let mgr = &ip_manager;
-    let updated_subnets = aggregate_and_persist(focused_results, mgr, top_k).await;
+    let updated_subnets =
+        aggregate_and_persist(focused_results, &ip_manager, top_k);
 
     ScanStats {
         total_scanned: initial_total + focused_total,
@@ -243,13 +248,13 @@ async fn run_initial_scan(
 ///
 /// # 返回值
 /// 热点子网列表
-async fn analyze_hot_spots(
+fn analyze_hot_spots(
     initial_results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
     promising_percent: f64,
 ) -> Vec<IpNet> {
     info!("[Phase 2/3] Starting hot spot analysis...");
 
-    let results = initial_results.lock().await;
+    let results = initial_results.lock();
     let mut promising: Vec<SubnetQuality> = results
         .iter()
         .filter_map(|(subnet, samples)| {
@@ -334,12 +339,12 @@ async fn run_focused_scan(
 ///
 /// # 返回值
 /// 更新的子网数量
-async fn aggregate_and_persist(
+fn aggregate_and_persist(
     results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
     ip_manager: &IpManager,
     top_k_percent: f64,
 ) -> usize {
-    let guard = results.lock().await;
+    let guard = results.lock();
     let mut updated = 0;
 
     for (subnet, samples) in guard.iter() {
@@ -363,7 +368,10 @@ async fn aggregate_and_persist(
 ///
 /// # 返回值
 /// (子网, IP) 元组列表
-fn generate_scan_targets(subnets: &[IpNet], samples: usize) -> Vec<(IpNet, IpAddr)> {
+fn generate_scan_targets(
+    subnets: &[IpNet],
+    samples: usize,
+) -> Vec<(IpNet, IpAddr)> {
     let mut targets = Vec::with_capacity(subnets.len() * samples);
     let mut rng = rand::thread_rng();
 
@@ -377,21 +385,15 @@ fn generate_scan_targets(subnets: &[IpNet], samples: usize) -> Vec<(IpNet, IpAdd
     targets
 }
 
-async fn execute_scan_stream(
-    targets: Vec<(IpNet, IpAddr)>,
-    concurrency_limit: usize,
-    trace_url: &str,
-    results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
-) -> (usize, usize) {
-    let mut success_count = 0;
-    let mut total_scanned = 0;
-
-    // 如果没有目标，直接返回
-    if targets.is_empty() {
-        return (0, 0);
-    }
-
-    let pb = ProgressBar::new(targets.len() as u64);
+/// 创建进度条
+///
+/// # 参数
+/// - `total`: 总任务数
+///
+/// # 返回值
+/// 进度条实例
+fn create_progress_bar(total: u64) -> ProgressBar {
+    let pb = ProgressBar::new(total);
     let tpl = "{spinner:.green} [{elapsed_precise}] \
         [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}";
     pb.set_style(
@@ -401,23 +403,71 @@ async fn execute_scan_stream(
             .progress_chars("#>-"),
     );
     pb.set_message("Scanning IPs...");
+    pb
+}
 
-    let trace_url = Arc::new(trace_url.to_string());
+/// 批量写入结果
+///
+/// # 参数
+/// - `batch`: 待写入的批次数据
+/// - `results`: 结果存储容器
+fn flush_batch(
+    batch: &mut Vec<(IpNet, IpQuality)>,
+    results: &Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let mut guard = results.lock();
+    for (subnet, quality) in batch.drain(..) {
+        guard.entry(subnet).or_default().push(quality);
+    }
+}
 
-    // 使用流式处理，避免一次性加载所有目标到内存
+/// 执行流式扫描
+///
+/// # 参数
+/// - `targets`: 扫描目标列表
+/// - `concurrency_limit`: 并发限制
+/// - `trace_url`: 探测 URL
+/// - `results`: 结果存储容器
+///
+/// # 返回值
+/// (成功数, 总扫描数)
+async fn execute_scan_stream(
+    targets: Vec<(IpNet, IpAddr)>,
+    concurrency_limit: usize,
+    trace_url: &str,
+    results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
+) -> (usize, usize) {
+    if targets.is_empty() {
+        return (0, 0);
+    }
+
+    let pb = create_progress_bar(targets.len() as u64);
+    let url = match reqwest::Url::parse(trace_url) {
+        Ok(u) => u,
+        Err(_) => return (0, 0),
+    };
+    let host = url.host_str().unwrap_or("").to_string();
+    let port = url.port_or_known_default().unwrap_or(80);
+    let trace_url_arc = Arc::new(trace_url.to_string());
+    let host_arc = Arc::new(host);
+
     let mut stream = stream::iter(targets)
         .map(|(subnet, ip)| {
-            let trace_url = trace_url.clone();
+            let url_ref = trace_url_arc.clone();
+            let host_ref = host_arc.clone();
             async move {
-                let quality = test_ip(ip, &trace_url).await;
+                let quality = test_ip(ip, &url_ref, &host_ref, port).await;
                 (subnet, quality)
             }
         })
         .buffer_unordered(concurrency_limit);
 
-    // 批量处理结果，减少锁竞争
-    let mut batch: Vec<(IpNet, IpQuality)> = Vec::with_capacity(100);
-    const BATCH_SIZE: usize = 100;
+    let mut success_count = 0;
+    let mut total_scanned = 0;
+    let mut batch = Vec::with_capacity(100);
 
     while let Some((subnet, quality_opt)) = stream.next().await {
         total_scanned += 1;
@@ -425,32 +475,29 @@ async fn execute_scan_stream(
             success_count += 1;
             pb.set_message(format!("Success: {}", success_count));
             batch.push((subnet, quality));
-
-            // 批量写入，减少锁竞争
-            if batch.len() >= BATCH_SIZE {
-                let mut guard = results.lock().await;
-                for (subnet, quality) in batch.drain(..) {
-                    guard.entry(subnet).or_insert_with(Vec::new).push(quality);
-                }
+            if batch.len() >= 100 {
+                flush_batch(&mut batch, &results);
             }
         }
         pb.inc(1);
     }
 
-    // 处理剩余的批次
-    if !batch.is_empty() {
-        let mut guard = results.lock().await;
-        for (subnet, quality) in batch {
-            guard.entry(subnet).or_insert_with(Vec::new).push(quality);
-        }
-    }
-
-    let msg = format!("Scan complete. Found {} valid IPs.", success_count);
-    pb.finish_with_message(msg);
-
+    flush_batch(&mut batch, &results);
+    pb.finish_with_message(format!(
+        "Scan complete. Found {} valid IPs.",
+        success_count
+    ));
     (success_count, total_scanned)
 }
 
+/// 将 CIDR 列表拆分为指定掩码的子网
+///
+/// # 参数
+/// - `cidrs`: CIDR 列表
+/// - `mask`: 目标子网掩码
+///
+/// # 返回值
+/// 拆分后的子网列表
 fn split_cidrs_to_subnets(cidrs: &[IpNet], mask: u8) -> Vec<IpNet> {
     let mut target_subnets = Vec::new();
     for cidr in cidrs {
@@ -462,30 +509,31 @@ fn split_cidrs_to_subnets(cidrs: &[IpNet], mask: u8) -> Vec<IpNet> {
     target_subnets
 }
 
+/// 从 URL 获取 ASN CIDR 列表
+///
+/// # 参数
+/// - `url`: ASN 数据 URL
+///
+/// # 返回值
+/// CIDR 列表或错误
 async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
-    let client = Client::builder().timeout(Duration::from_secs(15)).build()?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
 
     let mut last_error = None;
 
     for attempt in 1..=ASN_MAX_RETRIES {
         match client.get(url).send().await {
             Ok(resp) => match resp.text().await {
-                Ok(text) => {
-                    return Ok(parse_cidr_list(&text));
-                }
+                Ok(text) => return Ok(parse_cidr_list(&text)),
                 Err(e) => {
-                    warn!(
-                        "Failed to read ASN response (attempt {}/{}): {}",
-                        attempt, ASN_MAX_RETRIES, e
-                    );
+                    warn!("Failed to read ASN (try {}): {}", attempt, e);
                     last_error = Some(e.into());
                 }
             },
             Err(e) => {
-                warn!(
-                    "Failed to fetch ASN data (attempt {}/{}): {}",
-                    attempt, ASN_MAX_RETRIES, e
-                );
+                warn!("Failed to fetch ASN (try {}): {}", attempt, e);
                 last_error = Some(e.into());
             }
         }
@@ -495,35 +543,60 @@ async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
         }
     }
 
-    let err = last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
+    let err = last_error
+        .unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
     Err(err)
 }
 
+/// 解析 CIDR 列表文本
+///
+/// # 参数
+/// - `text`: 包含 CIDR 的文本
+///
+/// # 返回值
+/// 解析后的 CIDR 列表
 fn parse_cidr_list(text: &str) -> Vec<IpNet> {
     text.lines()
         .filter_map(|line| {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
-                None
-            } else {
-                line.parse::<IpNet>().ok()
+                return None;
             }
+            line.parse::<IpNet>().ok()
         })
         .collect()
 }
 
-async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
-    let url = reqwest::Url::parse(trace_url).ok()?;
-    let host = url.host_str()?;
-    let port = url.port_or_known_default().unwrap_or(80);
-
-    let client = Client::builder()
+/// 构建探测客户端
+///
+/// # 参数
+/// - `ip`: 目标 IP
+/// - `host`: 目标主机名
+/// - `port`: 目标端口
+///
+/// # 返回值
+/// 构建的客户端或 None
+fn build_probe_client(ip: IpAddr, host: &str, port: u16) -> Option<Client> {
+    Client::builder()
         .resolve(host, std::net::SocketAddr::new(ip, port))
         .timeout(Duration::from_secs(TIMEOUT_SECS))
         .connect_timeout(Duration::from_secs(1))
         .build()
-        .ok()?;
+        .ok()
+}
 
+/// 执行探测循环
+///
+/// # 参数
+/// - `client`: HTTP 客户端
+/// - `trace_url`: 探测 URL
+///
+/// # 返回值
+/// (延迟列表, 成功次数, 最后 Colo)
+async fn run_probes(
+    client: &Client,
+    trace_url: &str,
+) -> (Vec<u128>, usize, String) {
     let mut latencies = Vec::with_capacity(PROBE_COUNT);
     let mut success_count = 0;
     let mut last_colo = String::new();
@@ -544,13 +617,35 @@ async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
                 }
             }
             Err(e) => {
-                debug!("Probe {} for IP {} failed: {}", probe_idx + 1, ip, e);
+                debug!("Probe {} failed: {}", probe_idx + 1, e);
             }
         }
         if probe_idx < PROBE_COUNT - 1 {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+    (latencies, success_count, last_colo)
+}
+
+/// 测试单个 IP 的质量
+///
+/// # 参数
+/// - `ip`: 目标 IP
+/// - `trace_url`: 探测 URL
+/// - `host`: 目标主机名
+/// - `port`: 目标端口
+///
+/// # 返回值
+/// IP 质量信息或 None
+async fn test_ip(
+    ip: IpAddr,
+    trace_url: &str,
+    host: &str,
+    port: u16,
+) -> Option<IpQuality> {
+    let client = build_probe_client(ip, host, port)?;
+    let (latencies, success_count, last_colo) =
+        run_probes(&client, trace_url).await;
 
     if success_count == 0 {
         return None;
@@ -578,14 +673,28 @@ async fn test_ip(ip: IpAddr, trace_url: &str) -> Option<IpQuality> {
     ))
 }
 
+/// 计算平均值
+///
+/// # 参数
+/// - `values`: 数值列表
+///
+/// # 返回值
+/// 平均值
 fn calculate_average(values: &[u128]) -> u128 {
     if values.is_empty() {
         return 0;
     }
     let sum = values.iter().fold(0u128, |acc, &v| acc.saturating_add(v));
-    sum / values.len() as u128
+    sum.checked_div(values.len() as u128).unwrap_or(0)
 }
 
+/// 计算抖动值
+///
+/// # 参数
+/// - `latencies`: 延迟列表
+///
+/// # 返回值
+/// 抖动值
 fn calculate_jitter(latencies: &[u128]) -> u128 {
     if latencies.len() < 2 {
         return 0;
@@ -596,9 +705,17 @@ fn calculate_jitter(latencies: &[u128]) -> u128 {
         .map(|w| (w[0] as i128 - w[1] as i128).abs())
         .sum();
 
-    (sum_diff / (latencies.len() - 1) as i128) as u128
+    let count = (latencies.len() - 1) as i128;
+    (sum_diff.checked_div(count).unwrap_or(0)) as u128
 }
 
+/// 解析响应体中的 Colo 信息
+///
+/// # 参数
+/// - `body`: 响应体文本
+///
+/// # 返回值
+/// Colo 代码或 None
 fn parse_colo(body: &str) -> Option<String> {
     body.lines()
         .find_map(|line| line.strip_prefix("colo=").map(|s| s.to_string()))
