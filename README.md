@@ -11,6 +11,8 @@
 *   **并发连接竞速**: 转发流量时，同时向多个优选 IP 段内的随机 IP 发起连接，使用最快建立的连接，显著降低握手延迟。
 *   **Web 状态监控**: 内置 Web 服务器，实时查看当前 IP 段池状态和质量评分。
 *   **故障自动转移**: 智能处理连接失败，自动尝试备用 IP。
+*   **后台定时扫描**: 支持在转发流量的同时，后台定时执行 IP 扫描任务，持续更新优选 IP 池。
+*   **启动自检**: 可选 `--scan-on-start` 参数，确保服务启动时立即拥有最新的 IP 数据。
 
 ## 快速开始
 
@@ -47,6 +49,11 @@
     "initial_samples_per_subnet": 1,
     "promising_subnet_percent": 0.2,
     "focused_samples_per_subnet": 3
+  },
+  "background_scan": {
+    "enabled": false,
+    "interval_secs": 3600,
+    "concurrency": 100
   }
 }
 ```
@@ -72,6 +79,10 @@
     *   `initial_samples_per_subnet`: [自适应] 阶段一每个大网段的采样数（默认 1）。
     *   `promising_subnet_percent`: [自适应] 阶段二筛选“热点区域”的比例（默认 0.2，即前 20%）。
     *   `focused_samples_per_subnet`: [自适应] 阶段三（精细扫描）每个 /24 子网的采样数（默认 3）。
+*   **后台扫描 (`background_scan`)**:
+    *   `enabled`: 是否启用后台定时扫描（默认 false）。
+    *   `interval_secs`: 两次扫描的间隔时间，单位秒（默认 3600，最小 60）。
+    *   `concurrency`: 后台扫描时的并发数（默认 100）。
 
 **注意**：配置文件现在支持自动验证。如果 `selection_top_k_percent` 不在 0-1 范围内，或 `selection_random_n_subnets`/`selection_random_m_ips` 小于等于 0，程序将拒绝启动并显示错误消息。
 
@@ -98,9 +109,13 @@ cargo run -- --scan
 ```bash
 # 开发模式
 cargo run
+# 或启用后台扫描和立即扫描
+cargo run -- --scan-on-start
 
 # 生产模式
 ./target/release/tcp-forwarder-rust
+# 或
+./target/release/tcp-forwarder-rust --scan-on-start
 ```
 
 #### 其他工具命令
@@ -126,6 +141,19 @@ cargo build --release
 构建产物位于 `target/release/tcp-forwarder-rust` (Linux/macOS) 或 `target/release/tcp-forwarder-rust.exe` (Windows)。
 
 ## 最近改进
+
+### v0.2.4 (2026-02-15)
+
+**核心改进：**
+
+1.  **后台定时扫描 (Background Scanning)**:
+    - 支持在转发服务运行时，后台自动执行 IP 扫描任务。
+    - 扫描结果会自动持久化并实时更新 IP 池。
+    - 解决了长期运行后 IP 质量下降的问题。
+
+2.  **启动自检**:
+    - 新增 `--scan-on-start` 参数，支持启动时立即执行一次全量/自适应扫描。
+    - 即使配置文件中禁用了后台扫描，使用此参数也会强制开启。
 
 ### v0.2.3 (2026-01-10)
 

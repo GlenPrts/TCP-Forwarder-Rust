@@ -12,9 +12,9 @@
 - **运行时**: Tokio (Async)
 - **关键依赖**: `tokio`, `axum`, `reqwest`, `serde`, `tracing`, `anyhow`, `thiserror`
 - **架构**:
-  - `src/main.rs`: 入口点，参数解析，优雅停机。
+  - `src/main.rs`: 入口点，参数解析，优雅停机，后台扫描启动。
   - `src/server.rs`: TCP 转发逻辑，包含并发连接竞速机制和 TCP Keepalive。
-  - `src/scanner.rs`: IP 延迟扫描与评分，支持自适应三阶段扫描。
+  - `src/scanner.rs`: IP 延迟扫描与评分，支持自适应三阶段扫描及后台定时扫描。
   - `src/state.rs`: 共享状态管理 (`IpManager`)。
   - `src/config.rs`: 配置加载与验证（使用 `ipnetwork` 解析 CIDR）。
   - `src/web.rs`: Web 监控接口。
@@ -39,8 +39,9 @@ cargo build --release
 cargo run
 
 # 带参数运行
-cargo run -- --scan          # 运行 IP 扫描器
-cargo run -- --rank-colos    # 显示数据中心排名
+cargo run -- --scan            # 运行 IP 扫描器
+cargo run -- --scan-on-start   # 转发模式并立即扫描
+cargo run -- --rank-colos      # 显示数据中心排名
 ```
 
 ### 测试 (Test)
