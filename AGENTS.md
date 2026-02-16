@@ -10,13 +10,14 @@
 
 - **语言**: Rust (Edition 2021)
 - **运行时**: Tokio (Async)
-- **关键依赖**: `tokio`, `axum`, `reqwest`, `serde`, `tracing`, `anyhow`, `thiserror`
+- **关键依赖**: `tokio`, `axum`, `reqwest`, `serde`, `tracing`, `anyhow`, `thiserror`, `json_comments`
 - **架构**:
   - `src/main.rs`: 入口点，参数解析，优雅停机，后台扫描启动。
   - `src/server.rs`: TCP 转发逻辑，包含并发连接竞速机制和 TCP Keepalive。
+  - `src/pool.rs`: 预连接池，后台预建立 TCP 连接并维持水位，消除握手延迟。
   - `src/scanner.rs`: IP 延迟扫描与评分，支持自适应三阶段扫描及后台定时扫描。
   - `src/state.rs`: 共享状态管理 (`IpManager`)。
-  - `src/config.rs`: 配置加载与验证（使用 `ipnetwork` 解析 CIDR）。
+  - `src/config.rs`: 配置加载与验证（使用 `ipnetwork` 解析 CIDR，支持 JSONC 格式）。
   - `src/web.rs`: Web 监控接口。
   - `src/utils.rs`: 通用工具函数（IP 生成等）。
   - `src/analytics.rs`: 数据中心统计分析。
@@ -93,7 +94,7 @@ cargo clippy -- -D warnings
 - **不要**在应用日志中使用 `println!`；仅用于 CLI 输出（如 `--help`）。
 
 ### 配置 (Configuration)
-- 配置从 `config.json` 加载。
+- 配置从 `config.jsonc` 加载（支持 JSONC 格式，允许注释）。
 - 使用 `serde` 进行序列化。
 - 所有配置字段必须在 `AppConfig::validate` 中进行验证。
 

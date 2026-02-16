@@ -9,10 +9,12 @@
 *   **灵活的转发策略**: 支持基于评分的 Top K% 筛选，并在转发时采用随机选段 + 随机选 IP 的两级随机策略，有效均衡负载并避免拥塞。
 *   **持久化存储**: 扫描结果以子网为单位保存到本地文件，转发服务启动时直接加载。
 *   **并发连接竞速**: 转发流量时，同时向多个优选 IP 段内的随机 IP 发起连接，使用最快建立的连接，显著降低握手延迟。
-*   **Web 状态监控**: 内置 Web 服务器，实时查看当前 IP 段池状态和质量评分。
+*   **预连接池**: 后台预建立 TCP 连接并维持水位，客户端请求时直接复用，消除握手延迟。池空时自动降级为竞速模式。
+*   **Web 状态监控**: 内置 Web 服务器，实时查看当前 IP 段池状态、质量评分和连接池统计。
 *   **故障自动转移**: 智能处理连接失败，自动尝试备用 IP。
 *   **后台定时扫描**: 支持在转发流量的同时，后台定时执行 IP 扫描任务，持续更新优选 IP 池。
 *   **启动自检**: 可选 `--scan-on-start` 参数，确保服务启动时立即拥有最新的 IP 数据。
+*   **JSONC 配置**: 配置文件支持注释（`config.jsonc`），方便文档化和维护。
 
 ## 快速开始
 
@@ -22,38 +24,49 @@
 
 ### 2. 配置文件
 
-在项目根目录下创建或修改 `config.json` 文件：
+在项目根目录下创建或修改 `config.jsonc` 文件（支持注释）：
 
-```json
+```jsonc
 {
+  // 转发目标端口（Cloudflare HTTPS）
   "target_port": 443,
-  "target_colos": [
-    "SJC",
-    "LAX"
-  ],
+  // 限定数据中心代码，如 ["SJC", "LAX"]；空数组则不限制
+  "target_colos": [],
   "cidr_list": [
     "104.16.0.0/12",
     "172.64.0.0/13"
   ],
-  "bind_addr": "0.0.0.0:8080",
-  "web_addr": "0.0.0.0:3000",
+  "bind_addr": "127.0.0.1:8080",
+  "web_addr": "127.0.0.1:3000",
   "trace_url": "http://engage.cloudflareclient.com/cdn-cgi/trace",
   "asn_url": "https://asn.0x01111110.com/13335?4",
   "ip_store_file": "subnet_results.json",
-  "selection_top_k_percent": 0.1,
+  "selection_top_k_percent": 0.3,
   "selection_random_n_subnets": 3,
   "selection_random_m_ips": 2,
   "scan_strategy": {
     "type": "adaptive",
     "initial_scan_mask": 20,
-    "initial_samples_per_subnet": 1,
+    "initial_samples_per_subnet": 5,
     "promising_subnet_percent": 0.2,
     "focused_samples_per_subnet": 3
   },
   "background_scan": {
-    "enabled": false,
+    "enabled": true,
     "interval_secs": 3600,
-    "concurrency": 100
+    "concurrency": 50
+  },
+  // 预连接池：后台预建立 TCP 连接，消除握手延迟
+  "connection_pool": {
+    "enabled": true,
+    // 池容量上限
+    "pool_size": 16,
+    // 后台定时维持的最小空闲连接数
+    "min_idle": 3,
+    // 连接最大空闲时间（秒），需低于 CF 的 ~15s
+    "max_idle_secs": 12,
+    // 定时清理 + 水位检查间隔（毫秒）
+    "refill_interval_ms": 4000
   }
 }
 ```
@@ -83,8 +96,14 @@
     *   `enabled`: 是否启用后台定时扫描（默认 false）。
     *   `interval_secs`: 两次扫描的间隔时间，单位秒（默认 3600，最小 60）。
     *   `concurrency`: 后台扫描时的并发数（默认 100）。
+*   **预连接池 (`connection_pool`)**:
+    *   `enabled`: 是否启用预连接池（默认 false）。
+    *   `pool_size`: 池容量上限（默认 8）。
+    *   `min_idle`: 后台定时维持的最小空闲连接数（默认 2，不得超过 pool_size）。
+    *   `max_idle_secs`: 连接最大空闲时间，单位秒（默认 12，最小 5）。Cloudflare 约 15 秒关闭空闲连接，建议设为 12 以留余量。
+    *   `refill_interval_ms`: 后台定时清理和水位检查的间隔，单位毫秒（默认 5000，最小 100）。
 
-**注意**：配置文件现在支持自动验证。如果 `selection_top_k_percent` 不在 0-1 范围内，或 `selection_random_n_subnets`/`selection_random_m_ips` 小于等于 0，程序将拒绝启动并显示错误消息。
+**注意**：配置文件支持 JSONC 格式（允许 `//` 和 `/* */` 注释）。所有配置参数均会自动验证，不合法时程序拒绝启动并显示错误消息。
 
 ### 3. 使用步骤
 
@@ -128,7 +147,7 @@ cargo run -- --rank-colos
 ./target/release/tcp-forwarder-rust --rank-colos
 ```
 
-此命令将按平均评分降序输出各数据中心的统计信息，帮助您决定 `config.json` 中 `target_colos` 的设置。
+此命令将按平均评分降序输出各数据中心的统计信息，帮助您决定 `config.jsonc` 中 `target_colos` 的设置。
 
 ### 4. 构建生产版本
 
@@ -141,6 +160,20 @@ cargo build --release
 构建产物位于 `target/release/tcp-forwarder-rust` (Linux/macOS) 或 `target/release/tcp-forwarder-rust.exe` (Windows)。
 
 ## 最近改进
+
+### v0.2.5 (2026-02-16)
+
+**核心改进：**
+
+1.  **预连接池 (Connection Pool)**:
+    - 后台预建立 TCP 连接并维持最小空闲水位，客户端请求时直接复用，消除 TCP 握手延迟。
+    - 池空时自动降级为原有的并发竞速连接模式，零风险启用。
+    - 支持响应式补充（acquire 后立即触发）和定时清理（过期/死连接自动淘汰）。
+    - 新增 Web API `/api/v1/pool` 查看连接池统计（命中率、过期数、淘汰数等）。
+
+2.  **JSONC 配置格式**:
+    - 配置文件从 `config.json` 迁移为 `config.jsonc`，支持 `//` 和 `/* */` 注释。
+    - 引入 `json_comments` 库进行注释剥离，对现有配置完全兼容。
 
 ### v0.2.4 (2026-02-15)
 
@@ -214,10 +247,16 @@ cargo build --release
 
 ## 监控接口
 
-服务启动后，可以访问 Web 接口查看当前加载的优选 IP 段列表及其质量评分：
+服务启动后，可以访问 Web 接口查看服务状态：
 
-*   地址: `http://localhost:3000/status` (默认)
-*   返回格式: JSON 数组，按评分从高到低排序。
+*   **IP 段状态**: `http://localhost:3000/status` (默认)
+*   **健康检查**: `http://localhost:3000/health`
+*   **子网列表 (带元数据)**: `http://localhost:3000/api/v1/subnets`
+*   **连接池统计**: `http://localhost:3000/api/v1/pool`（未启用时返回 404）
+
+### IP 段状态示例
+
+返回格式: JSON 数组，按评分从高到低排序。
 
 ```json
 [
@@ -233,3 +272,19 @@ cargo build --release
   },
   ...
 ]
+```
+
+### 连接池统计示例
+
+```json
+{
+  "pool_size": 5,
+  "total_acquired": 128,
+  "hits": 110,
+  "misses": 18,
+  "expired": 7,
+  "dead": 3,
+  "evicted": 0,
+  "cleaned": 10
+}
+```
