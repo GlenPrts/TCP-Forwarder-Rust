@@ -1,0 +1,70 @@
+{
+  // 转发目标端口（Cloudflare HTTPS）
+  "target_port": 443,
+
+  // 限定数据中心代码，如 ["SJC", "LAX"]；空数组则不限制
+  "target_colos": [],
+
+  // Cloudflare IP 段
+  "cidr_list": [
+    "104.16.0.0/12",
+    "172.64.0.0/13"
+  ],
+
+  // TCP 转发服务监听地址
+  "bind_addr": "127.0.0.1:8080",
+  // Web 监控服务监听地址（/health, /status, /api/v1/pool）
+  "web_addr": "127.0.0.1:3000",
+
+  // IP 延迟测试和 Colo 探测 URL
+  "trace_url": "http://engage.cloudflareclient.com/cdn-cgi/trace",
+  // ASN CIDR 动态更新源
+  "asn_url": "https://asn.0x01111110.com/13335?4",
+  // 扫描结果持久化路径
+  "ip_store_file": "subnet_results.json",
+
+  // --- IP 选择策略 ---
+  // 仅使用评分最高的前 30% IP 段
+  "selection_top_k_percent": 0.3,
+  // 每次连接随机选取 3 个子网
+  "selection_random_n_subnets": 3,
+  // 每个子网内随机生成 2 个 IP 参与竞速
+  "selection_random_m_ips": 2,
+
+  // --- 扫描策略 ---
+  "scan_strategy": {
+    // "full_scan" 或 "adaptive"
+    "type": "adaptive",
+    // 阶段一：粗扫掩码（/20 = 4096 IP 一组）
+    "initial_scan_mask": 20,
+    // 阶段一：每组采样数
+    "initial_samples_per_subnet": 5,
+    // 阶段二：取前 20% 为热点区域
+    "promising_subnet_percent": 0.2,
+    // 阶段三：热点区域每个 /24 的精细采样数
+    "focused_samples_per_subnet": 3
+  },
+
+  // --- 后台定时扫描 ---
+  "background_scan": {
+    "enabled": true,
+    // 扫描间隔（秒），最小 60
+    "interval_secs": 3600,
+    // 并发探测数
+    "concurrency": 50
+  },
+
+  // --- 预连接池 ---
+  // CF 空闲 TCP 约 15s 后关闭，据此调参
+  "connection_pool": {
+    "enabled": true,
+    // 池容量上限
+    "pool_size": 16,
+    // 后台定时维持的最小空闲连接数
+    "min_idle": 3,
+    // 连接最大空闲时间（秒），需低于 CF 的 ~15s
+    "max_idle_secs": 12,
+    // 定时清理 + 水位检查间隔（毫秒）
+    "refill_interval_ms": 4000
+  }
+}

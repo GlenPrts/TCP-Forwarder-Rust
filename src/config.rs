@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ipnet::IpNet;
+use json_comments::StripComments;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
@@ -42,6 +43,18 @@ pub enum ConfigError {
 
     #[error("background_scan concurrency must be > 0")]
     InvalidBgScanConcurrency,
+
+    #[error("connection_pool pool_size must be > 0")]
+    InvalidPoolSize,
+
+    #[error("connection_pool min_idle must be <= pool_size")]
+    InvalidPoolMinIdle,
+
+    #[error("connection_pool max_idle_secs must be >= 5")]
+    InvalidPoolMaxIdle,
+
+    #[error("connection_pool refill_interval_ms must be >= 100")]
+    InvalidPoolRefillInterval,
 }
 
 /// 后台定时扫描配置
@@ -89,6 +102,80 @@ impl BackgroundScanConfig {
         }
         if self.concurrency == 0 {
             return Err(ConfigError::InvalidBgScanConcurrency.into());
+        }
+        Ok(())
+    }
+}
+
+/// 预连接池配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionPoolConfig {
+    /// 是否启用预连接池
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 池容量上限（防止突发补充过多）
+    #[serde(default = "default_pool_size")]
+    pub pool_size: usize,
+
+    /// 最小空闲连接数（后台定时维持的水位）
+    #[serde(default = "default_min_idle")]
+    pub min_idle: usize,
+
+    /// 连接最大空闲时间（秒），超过则丢弃
+    #[serde(default = "default_max_idle_secs")]
+    pub max_idle_secs: u64,
+
+    /// 后台定时清理和水位检查的间隔（毫秒）
+    #[serde(default = "default_refill_interval_ms")]
+    pub refill_interval_ms: u64,
+}
+
+fn default_pool_size() -> usize {
+    8
+}
+
+fn default_min_idle() -> usize {
+    2
+}
+
+fn default_max_idle_secs() -> u64 {
+    12
+}
+
+fn default_refill_interval_ms() -> u64 {
+    5000
+}
+
+impl Default for ConnectionPoolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pool_size: default_pool_size(),
+            min_idle: default_min_idle(),
+            max_idle_secs: default_max_idle_secs(),
+            refill_interval_ms: default_refill_interval_ms(),
+        }
+    }
+}
+
+impl ConnectionPoolConfig {
+    /// 验证预连接池配置
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.pool_size == 0 {
+            return Err(ConfigError::InvalidPoolSize.into());
+        }
+        if self.min_idle > self.pool_size {
+            return Err(ConfigError::InvalidPoolMinIdle.into());
+        }
+        if self.max_idle_secs < 5 {
+            return Err(ConfigError::InvalidPoolMaxIdle.into());
+        }
+        if self.refill_interval_ms < 100 {
+            return Err(ConfigError::InvalidPoolRefillInterval.into());
         }
         Ok(())
     }
@@ -224,6 +311,10 @@ pub struct AppConfig {
     /// 后台定时扫描配置
     #[serde(default)]
     pub background_scan: BackgroundScanConfig,
+
+    /// 预连接池配置
+    #[serde(default)]
+    pub connection_pool: ConnectionPoolConfig,
 }
 
 fn default_top_k_percent() -> f64 {
@@ -257,18 +348,20 @@ impl Default for AppConfig {
             selection_random_m_ips: default_m_ips(),
             scan_strategy: ScanStrategyConfig::default(),
             background_scan: BackgroundScanConfig::default(),
+            connection_pool: ConnectionPoolConfig::default(),
         }
     }
 }
 
 impl AppConfig {
-    /// 从文件加载配置
+    /// 从文件加载配置（支持 JSONC 格式，允许注释）
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let file = File::open(path)
             .with_context(|| format!("Failed to open config file: {}", path.display()))?;
         let reader = BufReader::new(file);
-        let config: Self = serde_json::from_reader(reader)
+        let stripped = StripComments::new(reader);
+        let config: Self = serde_json::from_reader(stripped)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
         config.validate()?;
         Ok(config)
@@ -318,6 +411,7 @@ impl AppConfig {
 
         self.scan_strategy.validate()?;
         self.background_scan.validate()?;
+        self.connection_pool.validate()?;
 
         Ok(())
     }

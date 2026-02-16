@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::model::SubnetQuality;
+use crate::pool::ConnectionPool;
 use crate::state::IpManager;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde::Serialize;
@@ -7,7 +8,12 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-/// 健康检查响应
+#[derive(Clone)]
+struct AppState {
+    ip_manager: IpManager,
+    pool: Option<Arc<ConnectionPool>>,
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -15,7 +21,6 @@ struct HealthResponse {
     subnet_count: usize,
 }
 
-/// 状态响应（带元数据）
 #[derive(Serialize)]
 struct StatusResponse {
     total_subnets: usize,
@@ -23,16 +28,26 @@ struct StatusResponse {
 }
 
 /// 启动 Web 服务器
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `pool`: 预连接池（可选）
+/// - `cancel_token`: 取消令牌
 pub async fn start_web_server(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
+    pool: Option<Arc<ConnectionPool>>,
     cancel_token: CancellationToken,
 ) {
+    let state = AppState { ip_manager, pool };
+
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/status", get(get_status))
         .route("/api/v1/subnets", get(get_subnets_api))
-        .with_state(ip_manager);
+        .route("/api/v1/pool", get(get_pool_stats))
+        .with_state(state);
 
     info!("Web server listening on {}", config.web_addr);
 
@@ -44,7 +59,6 @@ pub async fn start_web_server(
         }
     };
 
-    // 使用 axum 的优雅关闭
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             cancel_token.cancelled().await;
@@ -58,32 +72,42 @@ pub async fn start_web_server(
     info!("Web server stopped");
 }
 
-/// 健康检查端点
-async fn health_check(State(ip_manager): State<IpManager>) -> impl IntoResponse {
+async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     let response = HealthResponse {
         status: "healthy",
         version: env!("CARGO_PKG_VERSION"),
-        subnet_count: ip_manager.subnet_count(),
+        subnet_count: state.ip_manager.subnet_count(),
     };
-
     (StatusCode::OK, Json(response))
 }
 
-/// 获取状态（兼容旧 API）
-async fn get_status(State(ip_manager): State<IpManager>) -> Json<Vec<SubnetQuality>> {
-    let mut subnets: Vec<SubnetQuality> = ip_manager.get_all_subnets();
-    // 按评分降序排序
+async fn get_status(State(state): State<AppState>) -> Json<Vec<SubnetQuality>> {
+    let mut subnets: Vec<SubnetQuality> = state.ip_manager.get_all_subnets();
     subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
     Json(subnets)
 }
 
-/// 获取子网列表（新 API，带元数据）
-async fn get_subnets_api(State(ip_manager): State<IpManager>) -> Json<StatusResponse> {
-    let mut subnets: Vec<SubnetQuality> = ip_manager.get_all_subnets();
+async fn get_subnets_api(State(state): State<AppState>) -> Json<StatusResponse> {
+    let mut subnets: Vec<SubnetQuality> = state.ip_manager.get_all_subnets();
     subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
 
     Json(StatusResponse {
         total_subnets: subnets.len(),
         subnets,
     })
+}
+
+/// 连接池统计端点
+///
+/// # 返回值
+/// - 启用时: 200 + 统计 JSON
+/// - 未启用时: 404
+async fn get_pool_stats(State(state): State<AppState>) -> impl IntoResponse {
+    match state.pool {
+        Some(ref p) => {
+            let snapshot = p.snapshot().await;
+            (StatusCode::OK, Json(Some(snapshot)))
+        }
+        None => (StatusCode::NOT_FOUND, Json(None)),
+    }
 }

@@ -1,6 +1,7 @@
 mod analytics;
 mod config;
 mod model;
+mod pool;
 mod scanner;
 mod server;
 mod state;
@@ -10,6 +11,7 @@ mod web;
 use std::sync::Arc;
 
 use config::AppConfig;
+use pool::{run_refill_loop, ConnectionPool};
 use scanner::{run_background_scan, run_scan_once};
 use server::start_server;
 use state::IpManager;
@@ -33,7 +35,7 @@ fn print_help() {
     --help, -h        显示此帮助信息
 
 说明:
-    后台定时扫描通过 config.json 中的
+    后台定时扫描通过 config.jsonc 中的
     background_scan 配置块控制。
     --scan-on-start 仅在转发模式下生效，
     启动时立即执行一次扫描后再进入定时循环。
@@ -95,14 +97,14 @@ fn init_logging() {
 /// # 返回值
 /// Arc 包装的应用配置
 fn load_config() -> Arc<AppConfig> {
-    match AppConfig::load_from_file("config.json") {
+    match AppConfig::load_from_file("config.jsonc") {
         Ok(cfg) => {
-            info!("Loaded configuration from config.json");
+            info!("Loaded configuration from config.jsonc");
             Arc::new(cfg)
         }
         Err(e) => {
             warn!(
-                "Failed to load config.json: {}. \
+                "Failed to load config.jsonc: {}. \
                  Using default configuration.",
                 e
             );
@@ -130,24 +132,73 @@ async fn run_scan_mode(config: Arc<AppConfig>, ip_manager: IpManager) {
     }
 }
 
+/// 创建预连接池（如果配置启用）
+///
+/// # 参数
+/// - `config`: 应用配置
+///
+/// # 返回值
+/// 连接池实例（如果启用）
+fn create_connection_pool(config: &Arc<AppConfig>) -> Option<Arc<ConnectionPool>> {
+    if !config.connection_pool.enabled {
+        return None;
+    }
+    info!(
+        "Connection pool enabled (size={}, idle={}s)",
+        config.connection_pool.pool_size, config.connection_pool.max_idle_secs,
+    );
+    Some(Arc::new(ConnectionPool::new(
+        config.connection_pool.clone(),
+    )))
+}
+
+/// 启动连接池后台补充任务
+///
+/// # 参数
+/// - `pool`: 连接池
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `cancel_token`: 取消令牌
+///
+/// # 返回值
+/// 后台任务句柄（如果启用）
+fn spawn_pool_refill(
+    pool: &Option<Arc<ConnectionPool>>,
+    config: &Arc<AppConfig>,
+    ip_manager: &IpManager,
+    cancel_token: &CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let pool = pool.as_ref()?.clone();
+    Some(tokio::spawn(run_refill_loop(
+        pool,
+        config.clone(),
+        ip_manager.clone(),
+        cancel_token.clone(),
+    )))
+}
+
 /// 等待关闭信号并优雅停机
 ///
 /// # 参数
 /// - `server_handle`: 服务器任务句柄
 /// - `web_handle`: Web 服务任务句柄
 /// - `scan_handle`: 后台扫描任务句柄（可选）
+/// - `pool_handle`: 连接池补充任务句柄（可选）
 async fn graceful_shutdown(
     server_handle: tokio::task::JoinHandle<()>,
     web_handle: tokio::task::JoinHandle<()>,
     scan_handle: Option<tokio::task::JoinHandle<()>>,
+    pool_handle: Option<tokio::task::JoinHandle<()>>,
 ) {
-    let shutdown_timeout =
-        tokio::time::Duration::from_secs(10);
+    let shutdown_timeout = tokio::time::Duration::from_secs(10);
     tokio::select! {
         _ = async {
             let _ = server_handle.await;
             let _ = web_handle.await;
             if let Some(h) = scan_handle {
+                let _ = h.await;
+            }
+            if let Some(h) = pool_handle {
                 let _ = h.await;
             }
         } => {
@@ -167,45 +218,35 @@ async fn graceful_shutdown(
 /// - `config`: 应用配置
 /// - `ip_manager`: IP 管理器
 /// - `scan_on_start`: 是否启动时立即扫描
-async fn run_forward_mode(
-    config: Arc<AppConfig>,
-    ip_manager: IpManager,
-    scan_on_start: bool,
-) {
+async fn run_forward_mode(config: Arc<AppConfig>, ip_manager: IpManager, scan_on_start: bool) {
     let cancel_token = CancellationToken::new();
+
+    let pool = create_connection_pool(&config);
+
+    let pool_handle = spawn_pool_refill(&pool, &config, &ip_manager, &cancel_token);
 
     let server_handle = tokio::spawn(start_server(
         config.clone(),
         ip_manager.clone(),
+        pool.clone(),
         cancel_token.clone(),
     ));
 
     let web_handle = tokio::spawn(start_web_server(
         config.clone(),
         ip_manager.clone(),
+        pool.clone(),
         cancel_token.clone(),
     ));
 
-    let scan_handle = spawn_background_scan(
-        &config,
-        &ip_manager,
-        &cancel_token,
-        scan_on_start,
-    );
+    let scan_handle = spawn_background_scan(&config, &ip_manager, &cancel_token, scan_on_start);
 
     let _ = tokio::signal::ctrl_c().await;
-    info!(
-        "Received Ctrl+C, initiating graceful shutdown..."
-    );
+    info!("Received Ctrl+C, initiating graceful shutdown...");
 
     cancel_token.cancel();
 
-    graceful_shutdown(
-        server_handle,
-        web_handle,
-        scan_handle,
-    )
-    .await;
+    graceful_shutdown(server_handle, web_handle, scan_handle, pool_handle).await;
 }
 
 /// 启动后台扫描任务（如果配置启用）
@@ -228,7 +269,7 @@ fn spawn_background_scan(
     if !config.background_scan.enabled && !scan_on_start {
         return None;
     }
-    
+
     if scan_on_start && !config.background_scan.enabled {
         info!("CLI --scan-on-start forced background scan ON");
     }
@@ -263,10 +304,7 @@ async fn main() {
     }
 
     // 正常模式：从文件加载 IP
-    match ip_manager.load_from_file(
-        &config.ip_store_file,
-        config.selection_top_k_percent,
-    ) {
+    match ip_manager.load_from_file(&config.ip_store_file, config.selection_top_k_percent) {
         Ok(_) => info!("Loaded IPs from {}", config.ip_store_file),
         Err(e) => warn!(
             "Failed to load IPs from file: {}. \
@@ -280,11 +318,6 @@ async fn main() {
         return;
     }
 
-    run_forward_mode(
-        config,
-        ip_manager,
-        cli_args.scan_on_start,
-    )
-    .await;
+    run_forward_mode(config, ip_manager, cli_args.scan_on_start).await;
     info!("TCP Forwarder stopped");
 }

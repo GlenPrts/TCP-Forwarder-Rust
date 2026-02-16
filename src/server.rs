@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::pool::ConnectionPool;
 use crate::state::IpManager;
 use futures::stream::{FuturesUnordered, StreamExt};
 use socket2::{SockRef, TcpKeepalive};
@@ -36,6 +37,7 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 pub async fn start_server(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
+    pool: Option<Arc<ConnectionPool>>,
     cancel_token: CancellationToken,
 ) {
     let listener = match TcpListener::bind(config.bind_addr).await {
@@ -64,6 +66,7 @@ pub async fn start_server(
                             client_addr,
                             config.clone(),
                             ip_manager.clone(),
+                            pool.clone(),
                             semaphore.clone(),
                             cancel_token.clone(),
                         ).await;
@@ -93,6 +96,7 @@ async fn process_new_connection(
     addr: SocketAddr,
     config: Arc<AppConfig>,
     ip_manager: IpManager,
+    pool: Option<Arc<ConnectionPool>>,
     semaphore: Arc<Semaphore>,
     cancel_token: CancellationToken,
 ) {
@@ -110,7 +114,7 @@ async fn process_new_connection(
     tokio::spawn(async move {
         // 保持许可直到任务结束
         let _permit = permit;
-        if let Err(e) = handle_connection(stream, addr, config, ip_manager).await {
+        if let Err(e) = handle_connection(stream, addr, config, ip_manager, pool).await {
             debug!("Connection handling error for {}: {}", addr, e);
         }
     });
@@ -138,16 +142,13 @@ async fn handle_connection(
     client_addr: SocketAddr,
     config: Arc<AppConfig>,
     ip_manager: IpManager,
+    pool: Option<Arc<ConnectionPool>>,
 ) -> anyhow::Result<()> {
     // P0 Bug fix: 配置 Keepalive 和 NODELAY
     let _ = client_stream.set_nodelay(true);
     let _ = configure_keepalive(&client_stream);
 
-    let mut remote_stream = connect_to_remote(
-        &config,
-        &ip_manager,
-        client_addr
-    ).await?;
+    let mut remote_stream = connect_to_remote(&config, &ip_manager, &pool, client_addr).await?;
 
     // 双向数据复制
     match copy_bidirectional_with_sizes(
@@ -189,6 +190,32 @@ async fn handle_connection(
 async fn connect_to_remote(
     config: &Arc<AppConfig>,
     ip_manager: &IpManager,
+    pool: &Option<Arc<ConnectionPool>>,
+    client_addr: SocketAddr,
+) -> anyhow::Result<TcpStream> {
+    // 优先从预连接池获取
+    if let Some(ref p) = pool {
+        if let Some((stream, ip)) = p.acquire().await {
+            info!("Using pooled connection to {} for {}", ip, client_addr);
+            return Ok(stream);
+        }
+    }
+
+    connect_via_race(config, ip_manager, client_addr).await
+}
+
+/// 通过竞速建立远程连接（原始路径）
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `client_addr`: 客户端地址
+///
+/// # 返回值
+/// - `anyhow::Result<TcpStream>`: 建立的 TCP 连接
+async fn connect_via_race(
+    config: &Arc<AppConfig>,
+    ip_manager: &IpManager,
     client_addr: SocketAddr,
 ) -> anyhow::Result<TcpStream> {
     let candidate_ips = ip_manager.get_target_ips(
@@ -213,10 +240,7 @@ async fn connect_to_remote(
         client_addr
     );
 
-    if let Some(result) = race_connections(
-        &candidate_ips,
-        config.target_port
-    ).await {
+    if let Some(result) = race_connections(&candidate_ips, config.target_port).await {
         info!(
             "Fastest connection: {} for {} ({:?})",
             result.ip, client_addr, result.connect_time
@@ -291,9 +315,7 @@ async fn try_connect_single(
 /// # 返回值
 /// - `Option<ConnectionResult>`: 第一个成功的连接结果
 async fn await_first_success(
-    mut tasks: FuturesUnordered<
-        impl std::future::Future<Output = Option<ConnectionResult>>
-    >,
+    mut tasks: FuturesUnordered<impl std::future::Future<Output = Option<ConnectionResult>>>,
     cancel_token: CancellationToken,
 ) -> Option<ConnectionResult> {
     tokio::select! {
@@ -322,10 +344,7 @@ async fn await_first_success(
 ///
 /// # 返回值
 /// - `Option<ConnectionResult>`: 最快建立的连接
-async fn race_connections(
-    candidate_ips: &[IpAddr],
-    target_port: u16
-) -> Option<ConnectionResult> {
+async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<ConnectionResult> {
     if candidate_ips.is_empty() {
         return None;
     }
@@ -334,11 +353,7 @@ async fn race_connections(
     let tasks = FuturesUnordered::new();
 
     for &ip in candidate_ips {
-        tasks.push(try_connect_single(
-            ip,
-            target_port,
-            cancel_token.clone(),
-        ));
+        tasks.push(try_connect_single(ip, target_port, cancel_token.clone()));
     }
 
     await_first_success(tasks, cancel_token).await
@@ -352,10 +367,7 @@ async fn race_connections(
 ///
 /// # 返回值
 /// - `anyhow::Result<TcpStream>`: 建立的 TCP 连接
-async fn connect_with_fallback(
-    ip: IpAddr,
-    port: u16
-) -> anyhow::Result<TcpStream> {
+async fn connect_with_fallback(ip: IpAddr, port: u16) -> anyhow::Result<TcpStream> {
     let target_addr = SocketAddr::new(ip, port);
 
     match timeout(

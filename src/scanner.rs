@@ -130,11 +130,8 @@ async fn run_full_scan(
     )
     .await;
 
-    let updated_subnets = aggregate_and_persist(
-        subnet_results,
-        &ip_manager,
-        config.selection_top_k_percent,
-    );
+    let updated_subnets =
+        aggregate_and_persist(subnet_results, &ip_manager, config.selection_top_k_percent);
 
     ScanStats {
         total_scanned,
@@ -183,8 +180,7 @@ async fn run_adaptive_scan(
         run_focused_scan(&config, effective_concurrency, &hot_spots).await;
 
     let top_k = config.selection_top_k_percent;
-    let updated_subnets =
-        aggregate_and_persist(focused_results, &ip_manager, top_k);
+    let updated_subnets = aggregate_and_persist(focused_results, &ip_manager, top_k);
 
     ScanStats {
         total_scanned: initial_total + focused_total,
@@ -369,10 +365,7 @@ fn aggregate_and_persist(
 ///
 /// # 返回值
 /// (子网, IP) 元组列表
-fn generate_scan_targets(
-    subnets: &[IpNet],
-    samples: usize,
-) -> Vec<(IpNet, IpAddr)> {
+fn generate_scan_targets(subnets: &[IpNet], samples: usize) -> Vec<(IpNet, IpAddr)> {
     let mut targets = Vec::with_capacity(subnets.len() * samples);
     let mut rng = rand::thread_rng();
 
@@ -484,10 +477,7 @@ async fn execute_scan_stream(
     }
 
     flush_batch(&mut batch, &results);
-    pb.finish_with_message(format!(
-        "Scan complete. Found {} valid IPs.",
-        success_count
-    ));
+    pb.finish_with_message(format!("Scan complete. Found {} valid IPs.", success_count));
     (success_count, total_scanned)
 }
 
@@ -518,9 +508,7 @@ fn split_cidrs_to_subnets(cidrs: &[IpNet], mask: u8) -> Vec<IpNet> {
 /// # 返回值
 /// CIDR 列表或错误
 async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(15)).build()?;
 
     let mut last_error = None;
 
@@ -544,8 +532,7 @@ async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
         }
     }
 
-    let err = last_error
-        .unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
+    let err = last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
     Err(err)
 }
 
@@ -594,10 +581,7 @@ fn build_probe_client(ip: IpAddr, host: &str, port: u16) -> Option<Client> {
 ///
 /// # 返回值
 /// (延迟列表, 成功次数, 最后 Colo)
-async fn run_probes(
-    client: &Client,
-    trace_url: &str,
-) -> (Vec<u128>, usize, String) {
+async fn run_probes(client: &Client, trace_url: &str) -> (Vec<u128>, usize, String) {
     let mut latencies = Vec::with_capacity(PROBE_COUNT);
     let mut success_count = 0;
     let mut last_colo = String::new();
@@ -638,15 +622,9 @@ async fn run_probes(
 ///
 /// # 返回值
 /// IP 质量信息或 None
-async fn test_ip(
-    ip: IpAddr,
-    trace_url: &str,
-    host: &str,
-    port: u16,
-) -> Option<IpQuality> {
+async fn test_ip(ip: IpAddr, trace_url: &str, host: &str, port: u16) -> Option<IpQuality> {
     let client = build_probe_client(ip, host, port)?;
-    let (latencies, success_count, last_colo) =
-        run_probes(&client, trace_url).await;
+    let (latencies, success_count, last_colo) = run_probes(&client, trace_url).await;
 
     if success_count == 0 {
         return None;
@@ -730,40 +708,20 @@ fn parse_colo(body: &str) -> Option<String> {
 ///
 /// # 返回值
 /// 扫描统计信息
-async fn run_and_persist(
-    config: &Arc<AppConfig>,
-    ip_manager: &IpManager,
-) -> ScanStats {
+async fn run_and_persist(config: &Arc<AppConfig>, ip_manager: &IpManager) -> ScanStats {
     let concurrency = config.background_scan.concurrency;
-    let stats = run_scan_once(
-        config.clone(),
-        ip_manager.clone(),
-        concurrency,
-    )
-    .await;
+    let stats = run_scan_once(config.clone(), ip_manager.clone(), concurrency).await;
 
     // 使用 spawn_blocking 避免阻塞 async 线程
     let manager = ip_manager.clone();
     let path = config.ip_store_file.clone();
-    
-    let save_result = tokio::task::spawn_blocking(move || {
-        manager.save_to_file(&path)
-    })
-    .await;
+
+    let save_result = tokio::task::spawn_blocking(move || manager.save_to_file(&path)).await;
 
     match save_result {
-        Ok(Ok(_)) => info!(
-            "Background scan saved to {}",
-            config.ip_store_file
-        ),
-        Ok(Err(e)) => error!(
-            "Failed to save background scan: {}",
-            e
-        ),
-        Err(e) => error!(
-            "Failed to join save task: {}",
-            e
-        ),
+        Ok(Ok(_)) => info!("Background scan saved to {}", config.ip_store_file),
+        Ok(Err(e)) => error!("Failed to save background scan: {}", e),
+        Err(e) => error!("Failed to join save task: {}", e),
     }
 
     stats
@@ -782,27 +740,20 @@ pub async fn run_background_scan(
     cancel_token: CancellationToken,
     scan_on_start: bool,
 ) {
-    let interval = Duration::from_secs(
-        config.background_scan.interval_secs,
-    );
+    let interval = Duration::from_secs(config.background_scan.interval_secs);
 
     info!(
         "Background scan enabled \
          (interval={}s, concurrency={}, scan_on_start={})",
-        config.background_scan.interval_secs,
-        config.background_scan.concurrency,
-        scan_on_start,
+        config.background_scan.interval_secs, config.background_scan.concurrency, scan_on_start,
     );
 
     if scan_on_start {
         info!("Running initial background scan...");
-        let stats = run_and_persist(
-            &config, &ip_manager,
-        ).await;
+        let stats = run_and_persist(&config, &ip_manager).await;
         info!(
             "Initial scan done: {} scanned, {} ok",
-            stats.total_scanned,
-            stats.success_count,
+            stats.total_scanned, stats.success_count,
         );
     }
 
