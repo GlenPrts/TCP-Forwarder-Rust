@@ -150,6 +150,12 @@ async fn handle_connection(
 
     let mut remote_stream = connect_to_remote(&config, &ip_manager, &pool, client_addr).await?;
 
+    // 连接关闭后 peer_addr() 可能失败，提前保存
+    let peer = remote_stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
     // 双向数据复制
     match copy_bidirectional_with_sizes(
         &mut client_stream,
@@ -160,11 +166,6 @@ async fn handle_connection(
     .await
     {
         Ok((bytes_tx, bytes_rx)) => {
-            let peer = remote_stream
-                .peer_addr()
-                .map(|a| a.to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
-
             info!(
                 "Connection closed: {} -> {} (TX: {} bytes, RX: {} bytes)",
                 client_addr, peer, bytes_tx, bytes_rx
