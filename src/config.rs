@@ -315,6 +315,14 @@ pub struct AppConfig {
     /// 预连接池配置
     #[serde(default)]
     pub connection_pool: ConnectionPoolConfig,
+
+    /// 子网质量数据最大保留数量（防止长期运行内存持续增长）
+    #[serde(default = "default_max_subnets")]
+    pub max_subnets: usize,
+
+    /// 子网质量数据过期时间（秒）
+    #[serde(default = "default_subnet_ttl_secs")]
+    pub subnet_ttl_secs: u64,
 }
 
 fn default_top_k_percent() -> f64 {
@@ -327,6 +335,14 @@ fn default_n_subnets() -> usize {
 
 fn default_m_ips() -> usize {
     2
+}
+
+fn default_max_subnets() -> usize {
+    20_000
+}
+
+fn default_subnet_ttl_secs() -> u64 {
+    7 * 24 * 60 * 60
 }
 
 impl Default for AppConfig {
@@ -349,6 +365,8 @@ impl Default for AppConfig {
             scan_strategy: ScanStrategyConfig::default(),
             background_scan: BackgroundScanConfig::default(),
             connection_pool: ConnectionPoolConfig::default(),
+            max_subnets: default_max_subnets(),
+            subnet_ttl_secs: default_subnet_ttl_secs(),
         }
     }
 }
@@ -412,6 +430,10 @@ impl AppConfig {
         self.scan_strategy.validate()?;
         self.background_scan.validate()?;
         self.connection_pool.validate()?;
+
+        if self.max_subnets == 0 {
+            return Err(anyhow::anyhow!("max_subnets must be > 0"));
+        }
 
         Ok(())
     }

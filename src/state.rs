@@ -1,6 +1,7 @@
 use crate::model::SubnetQuality;
 use crate::utils::generate_random_ip_in_subnet;
 use anyhow::Result;
+use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use ipnet::IpNet;
 use parking_lot::RwLock;
@@ -42,6 +43,77 @@ impl IpManager {
         self.subnets.insert(quality.subnet, quality);
     }
 
+    pub fn cleanup_subnets(
+        &self,
+        now: DateTime<Utc>,
+        ttl_secs: u64,
+        max_subnets: usize,
+    ) -> (usize, usize) {
+        let removed_expired = self.remove_expired(now, ttl_secs);
+        let removed_evicted = self.evict_if_needed(max_subnets);
+        (removed_expired, removed_evicted)
+    }
+
+    fn remove_expired(&self, now: DateTime<Utc>, ttl_secs: u64) -> usize {
+        if ttl_secs == 0 {
+            return 0;
+        }
+
+        let ttl = Duration::seconds(ttl_secs as i64);
+        let cutoff = now - ttl;
+
+        let mut removed = 0usize;
+        let keys: Vec<IpNet> = self
+            .subnets
+            .iter()
+            .filter_map(|e| {
+                let updated = e.value().last_updated;
+                if updated < cutoff {
+                    return Some(*e.key());
+                }
+                None
+            })
+            .collect();
+
+        for key in keys {
+            if self.subnets.remove(&key).is_some() {
+                removed = removed.saturating_add(1);
+            }
+        }
+
+        removed
+    }
+
+    fn evict_if_needed(&self, max_subnets: usize) -> usize {
+        let current = self.subnets.len();
+        if current <= max_subnets {
+            return 0;
+        }
+
+        let need_remove = current - max_subnets;
+        let mut entries: Vec<(IpNet, f32, DateTime<Utc>)> = self
+            .subnets
+            .iter()
+            .map(|e| (*e.key(), e.value().score, e.value().last_updated))
+            .collect();
+
+        entries.sort_by(|a, b| {
+            let score_cmp = a.1.total_cmp(&b.1);
+            if score_cmp != std::cmp::Ordering::Equal {
+                return score_cmp;
+            }
+            a.2.cmp(&b.2)
+        });
+
+        let mut removed = 0usize;
+        for (subnet, _, _) in entries.into_iter().take(need_remove) {
+            if self.subnets.remove(&subnet).is_some() {
+                removed = removed.saturating_add(1);
+            }
+        }
+        removed
+    }
+
     /// 重新计算最佳子网缓存
     pub fn recalculate_best_subnets(&self, top_k_percent: f64) {
         let mut all_subnets: Vec<SubnetQuality> =
@@ -71,6 +143,10 @@ impl IpManager {
             let mut cache = self.best_subnets_cache.write();
             *cache = top_subnets;
         }
+    }
+
+    pub fn best_cache_len(&self) -> usize {
+        self.best_subnets_cache.read().len()
     }
 
     /// 获取用于转发的目标 IP 列表

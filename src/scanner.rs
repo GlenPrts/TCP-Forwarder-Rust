@@ -3,6 +3,7 @@ use crate::model::{IpQuality, SubnetQuality};
 use crate::state::IpManager;
 use crate::utils::generate_random_ip_in_subnet;
 use anyhow::Result;
+use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use ipnet::IpNet;
@@ -130,8 +131,12 @@ async fn run_full_scan(
     )
     .await;
 
-    let updated_subnets =
-        aggregate_and_persist(subnet_results, &ip_manager, config.selection_top_k_percent);
+    let updated_subnets = aggregate_and_persist(
+        subnet_results,
+        &ip_manager,
+        &config,
+        config.selection_top_k_percent,
+    );
 
     ScanStats {
         total_scanned,
@@ -180,7 +185,7 @@ async fn run_adaptive_scan(
         run_focused_scan(&config, effective_concurrency, &hot_spots).await;
 
     let top_k = config.selection_top_k_percent;
-    let updated_subnets = aggregate_and_persist(focused_results, &ip_manager, top_k);
+    let updated_subnets = aggregate_and_persist(focused_results, &ip_manager, &config, top_k);
 
     ScanStats {
         total_scanned: initial_total + focused_total,
@@ -339,6 +344,7 @@ async fn run_focused_scan(
 fn aggregate_and_persist(
     results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
     ip_manager: &IpManager,
+    config: &AppConfig,
     top_k_percent: f64,
 ) -> usize {
     let guard = results.lock();
@@ -351,6 +357,18 @@ fn aggregate_and_persist(
         let quality = SubnetQuality::new(*subnet, samples);
         ip_manager.update_subnet(quality);
         updated += 1;
+    }
+
+    let now = Utc::now();
+    let (removed_expired, removed_evicted) =
+        ip_manager.cleanup_subnets(now, config.subnet_ttl_secs, config.max_subnets);
+    if removed_expired > 0 || removed_evicted > 0 {
+        info!(
+            "Cleaned subnets: expired={}, evicted={}, remaining={}",
+            removed_expired,
+            removed_evicted,
+            ip_manager.subnet_count(),
+        );
     }
 
     ip_manager.recalculate_best_subnets(top_k_percent);
