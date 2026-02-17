@@ -10,6 +10,7 @@ use tracing::{error, info};
 
 #[derive(Clone)]
 struct AppState {
+    config: Arc<AppConfig>,
     ip_manager: IpManager,
     pool: Option<Arc<ConnectionPool>>,
 }
@@ -27,6 +28,14 @@ struct StatusResponse {
     subnets: Vec<SubnetQuality>,
 }
 
+#[derive(Serialize)]
+struct DebugResponse {
+    subnet_count: usize,
+    best_cache_len: usize,
+    max_subnets: usize,
+    subnet_ttl_secs: u64,
+}
+
 /// 启动 Web 服务器
 ///
 /// # 参数
@@ -40,13 +49,18 @@ pub async fn start_web_server(
     pool: Option<Arc<ConnectionPool>>,
     cancel_token: CancellationToken,
 ) {
-    let state = AppState { ip_manager, pool };
+    let state = AppState {
+        config: config.clone(),
+        ip_manager,
+        pool,
+    };
 
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/status", get(get_status))
         .route("/api/v1/subnets", get(get_subnets_api))
         .route("/api/v1/pool", get(get_pool_stats))
+        .route("/debug", get(get_debug))
         .with_state(state);
 
     info!("Web server listening on {}", config.web_addr);
@@ -95,6 +109,16 @@ async fn get_subnets_api(State(state): State<AppState>) -> Json<StatusResponse> 
         total_subnets: subnets.len(),
         subnets,
     })
+}
+
+async fn get_debug(State(state): State<AppState>) -> impl IntoResponse {
+    let response = DebugResponse {
+        subnet_count: state.ip_manager.subnet_count(),
+        best_cache_len: state.ip_manager.best_cache_len(),
+        max_subnets: state.config.max_subnets,
+        subnet_ttl_secs: state.config.subnet_ttl_secs,
+    };
+    (StatusCode::OK, Json(response))
 }
 
 /// 连接池统计端点
