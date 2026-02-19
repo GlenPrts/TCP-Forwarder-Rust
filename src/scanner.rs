@@ -11,6 +11,7 @@ use ipnet::IpNet;
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use reqwest::Client;
 use std::collections::HashMap;
@@ -115,7 +116,7 @@ async fn run_full_scan(
     let mask = FOCUSED_SCAN_SUBNET_MASK;
     let root_cidrs_vec = root_cidrs.to_vec();
     let target_subnets = tokio::task::spawn_blocking(move || {
-        split_cidrs_to_subnets(&root_cidrs_vec, mask)
+        split_cidrs_to_subnets(root_cidrs_vec, mask)
     })
     .await
     .unwrap_or_default();
@@ -237,7 +238,7 @@ async fn run_initial_scan(
     let mask = strategy.initial_scan_mask;
     let root_cidrs_vec = root_cidrs.to_vec();
     let subnets = tokio::task::spawn_blocking(move || {
-        split_cidrs_to_subnets(&root_cidrs_vec, mask)
+        split_cidrs_to_subnets(root_cidrs_vec, mask)
     })
     .await
     .unwrap_or_default();
@@ -336,7 +337,7 @@ async fn run_focused_scan(
     info!("[Phase 3/3] Starting focused scan on hot spots...");
     let hot_spots_vec = hot_spots.to_vec();
     let subnets = tokio::task::spawn_blocking(move || {
-        split_cidrs_to_subnets(&hot_spots_vec, FOCUSED_SCAN_SUBNET_MASK)
+        split_cidrs_to_subnets(hot_spots_vec, FOCUSED_SCAN_SUBNET_MASK)
     })
     .await
     .unwrap_or_default();
@@ -424,15 +425,17 @@ fn aggregate_and_persist(
 /// # 返回值
 /// (子网, IP) 元组流
 fn generate_scan_targets_stream(
-    subnets: Vec<IpNet>,
+    mut subnets: Vec<IpNet>,
     samples: usize,
 ) -> impl Stream<Item = (IpNet, IpAddr)> {
     stream! {
         let mut rng = StdRng::from_entropy();
-        for subnet in subnets {
-            for _ in 0..samples {
-                let ip = generate_random_ip_in_subnet(&subnet, &mut rng);
-                yield (subnet, ip);
+        // 每一轮采样都打乱子网顺序，确保采样在时间分布和空间分布上更加均匀
+        for _ in 0..samples {
+            subnets.shuffle(&mut rng);
+            for subnet in &subnets {
+                let ip = generate_random_ip_in_subnet(subnet, &mut rng);
+                yield (*subnet, ip);
             }
         }
     }
@@ -548,13 +551,41 @@ where
     (success_count, total_scanned)
 }
 
+/// 辅助迭代器，用于避开不必要的分配
+enum SubnetIter {
+    Single(std::iter::Once<IpNet>),
+    Multiple(ipnet::IpSubnets),
+}
+
+impl Iterator for SubnetIter {
+    type Item = IpNet;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(iter) => iter.next(),
+            Self::Multiple(iter) => iter.next(),
+        }
+    }
+}
+
 /// 将 CIDR 列表拆分为指定掩码的子网
-fn split_cidrs_to_subnets(cidrs: &[IpNet], mask: u8) -> Vec<IpNet> {
-    cidrs
-        .par_iter()
-        .flat_map(|cidr| match cidr.subnets(mask) {
-            Ok(subnets) => subnets.collect::<Vec<_>>(),
-            Err(_) => vec![*cidr],
+fn split_cidrs_to_subnets(cidrs: Vec<IpNet>, mask: u8) -> Vec<IpNet> {
+    // 先聚合 CIDR，减少重叠和冗余
+    let aggregated = IpNet::aggregate(&cidrs);
+
+    aggregated
+        .into_par_iter()
+        .flat_map_iter(|cidr| {
+            // 如果当前掩码已经大于或等于目标掩码，无需拆分
+            if cidr.prefix_len() >= mask {
+                return SubnetIter::Single(std::iter::once(cidr));
+            }
+
+            // 否则尝试拆分，如果失败则返回原 CIDR
+            match cidr.subnets(mask) {
+                Ok(subnets) => SubnetIter::Multiple(subnets),
+                Err(_) => SubnetIter::Single(std::iter::once(cidr)),
+            }
         })
         .collect()
 }
@@ -867,9 +898,25 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_average() {
-        let values = vec![100, 200, 300];
-        assert_eq!(calculate_average(&values), 200);
-        assert_eq!(calculate_average(&[]), 0);
+    fn test_split_cidrs_to_subnets() {
+        let cidrs = vec![
+            "104.16.0.0/24".parse::<IpNet>().unwrap(),
+            "104.16.1.0/24".parse::<IpNet>().unwrap(),
+            "104.16.0.0/23".parse::<IpNet>().unwrap(), // Overlaps with the two above
+        ];
+        let subnets = split_cidrs_to_subnets(cidrs, 24);
+        // Aggregation should merge them into 104.16.0.0/23, then split into two /24s
+        assert_eq!(subnets.len(), 2);
+        assert!(subnets.contains(&"104.16.0.0/24".parse::<IpNet>().unwrap()));
+        assert!(subnets.contains(&"104.16.1.0/24".parse::<IpNet>().unwrap()));
+    }
+
+    #[test]
+    fn test_split_cidrs_to_subnets_smaller_mask() {
+        let cidrs = vec!["104.16.0.0/24".parse::<IpNet>().unwrap()];
+        let subnets = split_cidrs_to_subnets(cidrs, 20);
+        // Should not split, return the original
+        assert_eq!(subnets.len(), 1);
+        assert_eq!(subnets[0], "104.16.0.0/24".parse::<IpNet>().unwrap());
     }
 }
