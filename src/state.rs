@@ -6,6 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use ipnet::IpNet;
 use rand::prelude::*;
+use rayon::prelude::*;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -101,7 +102,7 @@ impl IpManager {
             .map(|e| (*e.key(), e.value().score, e.value().last_updated))
             .collect();
 
-        entries.sort_by(|a, b| {
+        entries.par_sort_by(|a, b| {
             let score_cmp = a.1.total_cmp(&b.1);
             if score_cmp != std::cmp::Ordering::Equal {
                 return score_cmp;
@@ -128,7 +129,7 @@ impl IpManager {
             return;
         }
 
-        all_subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
+        all_subnets.par_sort_by(|a, b| b.score.total_cmp(&a.score));
 
         let total = all_subnets.len();
         let k = calculate_top_k(total, top_k_percent);

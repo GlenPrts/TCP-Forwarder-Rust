@@ -315,7 +315,12 @@ async fn main() {
     }
 
     if cli_args.rank_colos {
-        analytics::print_colo_ranking(&ip_manager);
+        let manager = ip_manager.clone();
+        tokio::task::spawn_blocking(move || {
+            analytics::print_colo_ranking(&manager);
+        })
+        .await
+        .unwrap_or(());
         return;
     }
 

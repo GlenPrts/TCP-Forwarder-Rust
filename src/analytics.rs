@@ -1,5 +1,6 @@
 use crate::model::SubnetQuality;
 use crate::state::IpManager;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// 数据中心统计信息
@@ -20,6 +21,15 @@ impl ColoStats {
         self.total_jitter = self.total_jitter.saturating_add(subnet.avg_jitter);
         self.total_loss_rate += subnet.avg_loss_rate;
         self.count = self.count.saturating_add(1);
+    }
+
+    /// 合并另一个统计信息
+    fn merge(&mut self, other: Self) {
+        self.total_score += other.total_score;
+        self.total_latency = self.total_latency.saturating_add(other.total_latency);
+        self.total_jitter = self.total_jitter.saturating_add(other.total_jitter);
+        self.total_loss_rate += other.total_loss_rate;
+        self.count = self.count.saturating_add(other.count);
     }
 
     fn avg_score(&self) -> f32 {
@@ -70,14 +80,18 @@ pub struct ColoRankingEntry {
 pub fn get_colo_ranking(ip_manager: &IpManager) -> Vec<ColoRankingEntry> {
     let subnets = ip_manager.get_all_subnets();
 
-    let mut stats_map: HashMap<String, ColoStats> = HashMap::new();
-
-    for subnet in &subnets {
-        stats_map
-            .entry(subnet.colo.clone())
-            .or_default()
-            .add(subnet);
-    }
+    let stats_map: HashMap<String, ColoStats> = subnets
+        .par_iter()
+        .fold(HashMap::<String, ColoStats>::new, |mut acc, subnet| {
+            acc.entry(subnet.colo.clone()).or_default().add(subnet);
+            acc
+        })
+        .reduce(HashMap::<String, ColoStats>::new, |mut acc1, acc2| {
+            for (colo, stats) in acc2 {
+                acc1.entry(colo).or_default().merge(stats);
+            }
+            acc1
+        });
 
     let mut ranking: Vec<ColoRankingEntry> = stats_map
         .into_iter()
@@ -92,7 +106,7 @@ pub fn get_colo_ranking(ip_manager: &IpManager) -> Vec<ColoRankingEntry> {
         .collect();
 
     // 按平均评分降序排序
-    ranking.sort_by(|a, b| b.avg_score.total_cmp(&a.avg_score));
+    ranking.par_sort_by(|a, b| b.avg_score.total_cmp(&a.avg_score));
 
     ranking
 }

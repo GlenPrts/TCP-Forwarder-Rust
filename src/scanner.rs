@@ -9,6 +9,7 @@ use futures::stream::{Stream, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use ipnet::IpNet;
 use parking_lot::Mutex;
+use rayon::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use reqwest::Client;
@@ -112,7 +113,12 @@ async fn run_full_scan(
     root_cidrs: &[IpNet],
 ) -> ScanStats {
     let mask = FOCUSED_SCAN_SUBNET_MASK;
-    let target_subnets = split_cidrs_to_subnets(root_cidrs, mask);
+    let root_cidrs_vec = root_cidrs.to_vec();
+    let target_subnets = tokio::task::spawn_blocking(move || {
+        split_cidrs_to_subnets(&root_cidrs_vec, mask)
+    })
+    .await
+    .unwrap_or_default();
     info!("Total target subnets to scan: {}", target_subnets.len());
 
     let samples = config.scan_strategy.focused_samples_per_subnet;
@@ -137,12 +143,14 @@ async fn run_full_scan(
     )
     .await;
 
-    let updated_subnets = aggregate_and_persist(
-        subnet_results,
-        &ip_manager,
-        &config,
-        config.selection_top_k_percent,
-    );
+    let manager = ip_manager.clone();
+    let cfg = config.clone();
+    let top_k = config.selection_top_k_percent;
+    let updated_subnets = tokio::task::spawn_blocking(move || {
+        aggregate_and_persist(subnet_results, &manager, &cfg, top_k)
+    })
+    .await
+    .unwrap_or(0);
 
     ScanStats {
         total_scanned,
@@ -173,10 +181,12 @@ async fn run_adaptive_scan(
     let (initial_success, initial_total, initial_results) =
         run_initial_scan(&config, &ip_manager, effective_concurrency, root_cidrs).await;
 
-    let hot_spots = analyze_hot_spots(
-        initial_results,
-        config.scan_strategy.promising_subnet_percent,
-    );
+    let promising_percent = config.scan_strategy.promising_subnet_percent;
+    let hot_spots = tokio::task::spawn_blocking(move || {
+        analyze_hot_spots(initial_results, promising_percent)
+    })
+    .await
+    .unwrap_or_default();
 
     if hot_spots.is_empty() {
         warn!("No promising subnets found in phase 1. Aborting scan.");
@@ -191,7 +201,13 @@ async fn run_adaptive_scan(
         run_focused_scan(&config, &ip_manager, effective_concurrency, &hot_spots).await;
 
     let top_k = config.selection_top_k_percent;
-    let updated_subnets = aggregate_and_persist(focused_results, &ip_manager, &config, top_k);
+    let manager = ip_manager.clone();
+    let cfg = config.clone();
+    let updated_subnets = tokio::task::spawn_blocking(move || {
+        aggregate_and_persist(focused_results, &manager, &cfg, top_k)
+    })
+    .await
+    .unwrap_or(0);
 
     ScanStats {
         total_scanned: initial_total + focused_total,
@@ -219,7 +235,12 @@ async fn run_initial_scan(
 
     info!("[Phase 1/3] Starting wide and sparse scan...");
     let mask = strategy.initial_scan_mask;
-    let subnets = split_cidrs_to_subnets(root_cidrs, mask);
+    let root_cidrs_vec = root_cidrs.to_vec();
+    let subnets = tokio::task::spawn_blocking(move || {
+        split_cidrs_to_subnets(&root_cidrs_vec, mask)
+    })
+    .await
+    .unwrap_or_default();
     info!(
         "[Phase 1/3] Split into {} /{} subnets.",
         subnets.len(),
@@ -268,7 +289,7 @@ fn analyze_hot_spots(
 
     let results = initial_results.lock();
     let mut promising: Vec<SubnetQuality> = results
-        .iter()
+        .par_iter()
         .filter_map(|(subnet, samples)| {
             if samples.is_empty() {
                 return None;
@@ -277,7 +298,7 @@ fn analyze_hot_spots(
         })
         .collect();
 
-    promising.sort_by(|a, b| b.score.total_cmp(&a.score));
+    promising.par_sort_by(|a, b| b.score.total_cmp(&a.score));
 
     let top_k = (promising.len() as f64 * promising_percent).ceil() as usize;
     let hot_spots: Vec<IpNet> = promising
@@ -313,7 +334,12 @@ async fn run_focused_scan(
     let strategy = &config.scan_strategy;
 
     info!("[Phase 3/3] Starting focused scan on hot spots...");
-    let subnets = split_cidrs_to_subnets(hot_spots, FOCUSED_SCAN_SUBNET_MASK);
+    let hot_spots_vec = hot_spots.to_vec();
+    let subnets = tokio::task::spawn_blocking(move || {
+        split_cidrs_to_subnets(&hot_spots_vec, FOCUSED_SCAN_SUBNET_MASK)
+    })
+    .await
+    .unwrap_or_default();
     info!(
         "[Phase 3/3] Split into {} /{} subnets.",
         subnets.len(),
@@ -362,16 +388,16 @@ fn aggregate_and_persist(
     top_k_percent: f64,
 ) -> usize {
     let guard = results.lock();
-    let mut updated = 0;
 
-    for (subnet, samples) in guard.iter() {
-        if samples.is_empty() {
-            continue;
+    guard.par_iter().for_each(|(subnet, samples)| {
+        if !samples.is_empty() {
+            let quality = SubnetQuality::new(*subnet, samples);
+            ip_manager.update_subnet(quality);
         }
-        let quality = SubnetQuality::new(*subnet, samples);
-        ip_manager.update_subnet(quality);
-        updated += 1;
-    }
+    });
+
+    let updated = guard.len();
+    drop(guard); // 提前释放锁
 
     let now = Utc::now();
     let (removed_expired, removed_evicted) =
@@ -523,22 +549,14 @@ where
 }
 
 /// 将 CIDR 列表拆分为指定掩码的子网
-///
-/// # 参数
-/// - `cidrs`: CIDR 列表
-/// - `mask`: 目标子网掩码
-///
-/// # 返回值
-/// 拆分后的子网列表
 fn split_cidrs_to_subnets(cidrs: &[IpNet], mask: u8) -> Vec<IpNet> {
-    let mut target_subnets = Vec::new();
-    for cidr in cidrs {
-        match cidr.subnets(mask) {
-            Ok(subnets) => target_subnets.extend(subnets),
-            Err(_) => target_subnets.push(*cidr),
-        }
-    }
-    target_subnets
+    cidrs
+        .par_iter()
+        .flat_map(|cidr| match cidr.subnets(mask) {
+            Ok(subnets) => subnets.collect::<Vec<_>>(),
+            Err(_) => vec![*cidr],
+        })
+        .collect()
 }
 
 /// 从 URL 获取 ASN CIDR 列表
