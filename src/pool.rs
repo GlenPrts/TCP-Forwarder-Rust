@@ -291,25 +291,25 @@ async fn pre_connect_one(
     )
     .await;
 
-    match connect_result {
-        Ok(Ok(stream)) => {
-            let _ = stream.set_nodelay(true);
-            let _ = configure_keepalive(&stream);
-            Some(PooledConnection {
-                stream,
-                ip,
-                created_at: Instant::now(),
-            })
-        }
+    let stream = match connect_result {
+        Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             debug!("Pre-connect to {} failed: {}", addr, e);
-            None
+            return None;
         }
         Err(_) => {
             debug!("Pre-connect to {} timed out", addr);
-            None
+            return None;
         }
-    }
+    };
+
+    let _ = stream.set_nodelay(true);
+    let _ = configure_keepalive(&stream);
+    Some(PooledConnection {
+        stream,
+        ip,
+        created_at: Instant::now(),
+    })
 }
 
 /// 补充连接到指定目标水位

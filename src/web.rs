@@ -127,11 +127,11 @@ async fn get_debug(State(state): State<AppState>) -> impl IntoResponse {
 /// - 启用时: 200 + 统计 JSON
 /// - 未启用时: 404
 async fn get_pool_stats(State(state): State<AppState>) -> impl IntoResponse {
-    match state.pool {
-        Some(ref p) => {
-            let snapshot = p.snapshot().await;
-            (StatusCode::OK, Json(Some(snapshot)))
-        }
-        None => (StatusCode::NOT_FOUND, Json(None)),
-    }
+    let pool = match state.pool {
+        Some(ref p) => p,
+        None => return (StatusCode::NOT_FOUND, Json(None)),
+    };
+
+    let snapshot = pool.snapshot().await;
+    (StatusCode::OK, Json(Some(snapshot)))
 }

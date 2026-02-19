@@ -152,24 +152,24 @@ async fn handle_connection(
         .unwrap_or_else(|_| "unknown".to_string());
 
     // 双向数据复制
-    match copy_bidirectional_with_sizes(
+    let copy_result = copy_bidirectional_with_sizes(
         &mut client_stream,
         &mut remote_stream,
         BUFFER_SIZE,
         BUFFER_SIZE,
     )
-    .await
-    {
-        Ok((bytes_tx, bytes_rx)) => {
-            info!(
-                "Connection closed: {} -> {} (TX: {} bytes, RX: {} bytes)",
-                client_addr, peer, bytes_tx, bytes_rx
-            );
-        }
-        Err(e) => {
-            debug!("Connection error with {}: {}", client_addr, e);
-        }
+    .await;
+
+    if let Err(e) = copy_result {
+        debug!("Connection error with {}: {}", client_addr, e);
+        return Ok(());
     }
+
+    let (bytes_tx, bytes_rx) = copy_result.unwrap();
+    info!(
+        "Connection closed: {} -> {} (TX: {} bytes, RX: {} bytes)",
+        client_addr, peer, bytes_tx, bytes_rx
+    );
 
     Ok(())
 }
@@ -197,7 +197,13 @@ async fn connect_to_remote(
         }
     }
 
-    connect_via_race(config, ip_manager, client_addr).await
+    let stream = connect_via_race(config, ip_manager, client_addr).await?;
+
+    // 延迟配置：仅对竞速胜出者（非池化连接）进行配置
+    let _ = stream.set_nodelay(true);
+    let _ = configure_keepalive(&stream);
+
+    Ok(stream)
 }
 
 /// 通过竞速建立远程连接（原始路径）
@@ -312,21 +318,19 @@ async fn try_connect_single(
             )
             .await;
 
-            match connect_result {
-                Ok(Ok(stream)) => {
-                    let _ = stream.set_nodelay(true);
-                    let _ = configure_keepalive(&stream);
-                    Some(ConnectionResult {
-                        stream,
-                        ip,
-                        connect_time: start.elapsed(),
-                    })
-                }
+            let stream = match connect_result {
+                Ok(Ok(s)) => s,
                 _ => {
                     drop(permit);
-                    None
+                    return None;
                 }
-            }
+            };
+
+            Some(ConnectionResult {
+                stream,
+                ip,
+                connect_time: start.elapsed(),
+            })
         } => result,
     }
 }
@@ -413,29 +417,28 @@ async fn connect_with_fallback(
     let _permit = ip_manager.acquire_fd_permit().await.ok();
     let target_addr = SocketAddr::new(ip, port);
 
-    match timeout(
+    let connect_result = timeout(
         Duration::from_secs(FALLBACK_TIMEOUT_SECS),
         TcpStream::connect(target_addr),
     )
-    .await
-    {
-        Ok(Ok(stream)) => {
-            let _ = stream.set_nodelay(true);
-            let _ = configure_keepalive(&stream);
-            Ok(stream)
-        }
+    .await;
+
+    let stream = match connect_result {
+        Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             error!(
                 "Failed to establish fallback connection to {}: {}",
                 target_addr, e
             );
-            Err(e.into())
+            return Err(e.into());
         }
         Err(_) => {
             error!("Timeout connecting to {}", target_addr);
-            Err(anyhow::anyhow!("Connection timeout"))
+            return Err(anyhow::anyhow!("Connection timeout"));
         }
-    }
+    };
+
+    Ok(stream)
 }
 
 /// 配置 TCP Keepalive
