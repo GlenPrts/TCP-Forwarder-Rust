@@ -111,25 +111,32 @@ impl ConnectionPool {
     pub async fn acquire(&self) -> Option<(TcpStream, IpAddr)> {
         self.stats.total_acquired.fetch_add(1, Ordering::Relaxed);
 
-        let mut queue = self.conns.lock().await;
-        while let Some(mut conn) = queue.pop_back() {
+        loop {
+            let mut conn = {
+                let mut queue = self.conns.lock().await;
+                let conn = queue.pop_back();
+                if conn.is_none() {
+                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                conn.unwrap()
+            };
+
             if !self.is_conn_fresh(&conn) {
                 self.stats.expired.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
+
             if !is_stream_alive(&mut conn.stream) {
                 self.stats.dead.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
+
             self.stats.hits.fetch_add(1, Ordering::Relaxed);
             debug!("Pool hit: reusing connection to {}", conn.ip);
-            drop(queue);
             self.refill_notify.notify_one();
             return Some((conn.stream, conn.ip));
         }
-
-        self.stats.misses.fetch_add(1, Ordering::Relaxed);
-        None
     }
 
     /// 获取连接池统计快照
@@ -178,31 +185,54 @@ impl ConnectionPool {
     /// # 返回值
     /// 本次清理移除的连接数
     async fn purge_stale(&self) -> usize {
-        let mut queue = self.conns.lock().await;
-        let before = queue.len();
-        let mut expired = 0u64;
-        let mut dead = 0u64;
+        let mut items = {
+            let mut queue = self.conns.lock().await;
+            if queue.is_empty() {
+                return 0;
+            }
+            std::mem::take(&mut *queue)
+        };
 
-        queue.retain_mut(|conn| {
+        let before = items.len();
+        let mut expired_count = 0u64;
+        let mut dead_count = 0u64;
+
+        items.retain_mut(|conn| {
             if !self.is_conn_fresh(conn) {
-                expired += 1;
+                expired_count += 1;
                 return false;
             }
             if !is_stream_alive(&mut conn.stream) {
-                dead += 1;
+                dead_count += 1;
                 return false;
             }
             true
         });
 
-        if expired > 0 {
-            self.stats.expired.fetch_add(expired, Ordering::Relaxed);
-        }
-        if dead > 0 {
-            self.stats.dead.fetch_add(dead, Ordering::Relaxed);
+        let mut queue = self.conns.lock().await;
+        let to_keep = items.len();
+
+        // 如果放回会导致超过 pool_size，则丢弃最旧的（即 items 的头部）
+        while items.len() + queue.len() > self.config.pool_size 
+            && !items.is_empty() 
+        {
+            items.pop_front();
+            self.stats.evicted.fetch_add(1, Ordering::Relaxed);
         }
 
-        let removed = before - queue.len();
+        // 将 items 插入到 queue 的前端（保持 LIFO，旧连接在前）
+        for conn in items.into_iter().rev() {
+            queue.push_front(conn);
+        }
+
+        if expired_count > 0 {
+            self.stats.expired.fetch_add(expired_count, Ordering::Relaxed);
+        }
+        if dead_count > 0 {
+            self.stats.dead.fetch_add(dead_count, Ordering::Relaxed);
+        }
+
+        let removed = before - to_keep;
         if removed > 0 {
             self.stats
                 .cleaned
@@ -397,7 +427,10 @@ pub async fn run_refill_loop(
     info!(
         "Connection pool started \
          (max={}, min_idle={}, idle={}s, interval={}ms)",
-        pool.config.pool_size, min_idle, pool.config.max_idle_secs, pool.config.refill_interval_ms,
+        pool.config.pool_size,
+        min_idle,
+        pool.config.max_idle_secs,
+        pool.config.refill_interval_ms,
     );
 
     // 启动时先填充到 min_idle
@@ -450,3 +483,129 @@ pub async fn run_refill_loop(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    async fn create_test_conn(
+        ip: &str,
+        server_addr: SocketAddr,
+    ) -> PooledConnection {
+        let stream = TcpStream::connect(server_addr).await.unwrap();
+        PooledConnection {
+            stream,
+            ip: ip.parse().unwrap(),
+            created_at: Instant::now(),
+        }
+    }
+
+    async fn start_test_server() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut _conns = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                _conns.push(stream);
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_pool_lifo() {
+        let addr = start_test_server().await;
+        let config = ConnectionPoolConfig {
+            enabled: true,
+            pool_size: 3,
+            min_idle: 1,
+            max_idle_secs: 10,
+            refill_interval_ms: 1000,
+        };
+        let pool = ConnectionPool::new(config);
+
+        pool.push(create_test_conn("1.1.1.1", addr).await).await;
+        pool.push(create_test_conn("2.2.2.2", addr).await).await;
+        pool.push(create_test_conn("3.3.3.3", addr).await).await;
+
+        // LIFO: 应该先拿到 3.3.3.3
+        let (_, ip) = pool.acquire().await.expect("Should acquire 3.3.3.3");
+        assert_eq!(ip, "3.3.3.3".parse::<IpAddr>().unwrap());
+
+        let (_, ip) = pool.acquire().await.expect("Should acquire 2.2.2.2");
+        assert_eq!(ip, "2.2.2.2".parse::<IpAddr>().unwrap());
+
+        let (_, ip) = pool.acquire().await.expect("Should acquire 1.1.1.1");
+        assert_eq!(ip, "1.1.1.1".parse::<IpAddr>().unwrap());
+
+        assert!(pool.acquire().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pool_eviction() {
+        let addr = start_test_server().await;
+        let config = ConnectionPoolConfig {
+            enabled: true,
+            pool_size: 2,
+            min_idle: 1,
+            max_idle_secs: 10,
+            refill_interval_ms: 1000,
+        };
+        let pool = ConnectionPool::new(config);
+
+        pool.push(create_test_conn("1.1.1.1", addr).await).await;
+        pool.push(create_test_conn("2.2.2.2", addr).await).await;
+        // 1.1.1.1 应该被挤出
+        pool.push(create_test_conn("3.3.3.3", addr).await).await;
+
+        let stats = pool.snapshot().await;
+        assert_eq!(stats.evicted, 1);
+
+        let (_, ip) = pool.acquire().await.expect("Should acquire 3.3.3.3");
+        assert_eq!(ip, "3.3.3.3".parse::<IpAddr>().unwrap());
+
+        let (_, ip) = pool.acquire().await.expect("Should acquire 2.2.2.2");
+        assert_eq!(ip, "2.2.2.2".parse::<IpAddr>().unwrap());
+
+        assert!(pool.acquire().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pool_purge_stale() {
+        let addr = start_test_server().await;
+        let config = ConnectionPoolConfig {
+            enabled: true,
+            pool_size: 5,
+            min_idle: 1,
+            max_idle_secs: 1, // 1秒过期
+            refill_interval_ms: 1000,
+        };
+        let pool = ConnectionPool::new(config);
+
+        pool.push(create_test_conn("1.1.1.1", addr).await).await;
+        
+        let mut conn2 = create_test_conn("2.2.2.2", addr).await;
+        // 手动设置过期时间
+        conn2.created_at = Instant::now() - Duration::from_secs(2);
+        pool.push(conn2).await;
+
+        pool.push(create_test_conn("3.3.3.3", addr).await).await;
+
+        // 清理前有 3 个
+        assert_eq!(pool.current_size().await, 3);
+
+        let purged = pool.purge_stale().await;
+        assert_eq!(purged, 1); // 2.2.2.2 应该被清理
+
+        // 清理后剩下 2 个，且顺序正确 (LIFO: 3.3.3.3, 1.1.1.1)
+        assert_eq!(pool.current_size().await, 2);
+
+        let (_, ip) = pool.acquire().await.expect("Should acquire 3.3.3.3");
+        assert_eq!(ip, "3.3.3.3".parse::<IpAddr>().unwrap());
+
+        let (_, ip) = pool.acquire().await.expect("Should acquire 1.1.1.1");
+        assert_eq!(ip, "1.1.1.1".parse::<IpAddr>().unwrap());
+    }
+}
+
