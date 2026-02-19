@@ -305,13 +305,22 @@ async fn main() {
     }
 
     // 正常模式：从文件加载 IP
-    match ip_manager.load_from_file(&config.ip_store_file, config.selection_top_k_percent) {
-        Ok(_) => info!("Loaded IPs from {}", config.ip_store_file),
-        Err(e) => warn!(
+    let manager = ip_manager.clone();
+    let path = config.ip_store_file.clone();
+    let top_k = config.selection_top_k_percent;
+    let load_result = tokio::task::spawn_blocking(move || {
+        manager.load_from_file(&path, top_k)
+    })
+    .await;
+
+    match load_result {
+        Ok(Ok(_)) => info!("Loaded IPs from {}", config.ip_store_file),
+        Ok(Err(e)) => warn!(
             "Failed to load IPs from file: {}. \
              Starting with empty list.",
             e
         ),
+        Err(e) => error!("Failed to join load task: {}", e),
     }
 
     if cli_args.rank_colos {

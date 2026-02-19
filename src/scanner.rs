@@ -603,27 +603,31 @@ async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
     let mut last_error = None;
 
     for attempt in 1..=ASN_MAX_RETRIES {
-        match client.get(url).send().await {
-            Ok(resp) => match resp.text().await {
-                Ok(text) => return Ok(parse_cidr_list(&text)),
-                Err(e) => {
-                    warn!("Failed to read ASN (try {}): {}", attempt, e);
-                    last_error = Some(e.into());
-                }
-            },
-            Err(e) => {
-                warn!("Failed to fetch ASN (try {}): {}", attempt, e);
-                last_error = Some(e.into());
-            }
+        let result = try_fetch_once(&client, url).await;
+        if let Ok(cidrs) = result {
+            return Ok(cidrs);
         }
+        
+        let e = result.unwrap_err();
+        warn!("Failed to fetch ASN (try {}): {}", attempt, e);
+        last_error = Some(e);
 
         if attempt < ASN_MAX_RETRIES {
             tokio::time::sleep(Duration::from_secs(ASN_RETRY_DELAY_SECS)).await;
         }
     }
 
-    let err = last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
+    let err = last_error.unwrap_or_else(|| {
+        anyhow::anyhow!("Unknown error fetching ASN CIDRs")
+    });
     Err(err)
+}
+
+/// 尝试单次获取 ASN CIDR 列表
+async fn try_fetch_once(client: &Client, url: &str) -> Result<Vec<IpNet>> {
+    let resp = client.get(url).send().await?;
+    let text = resp.text().await?;
+    Ok(parse_cidr_list(&text))
 }
 
 /// 解析 CIDR 列表文本
@@ -663,6 +667,39 @@ fn build_probe_client(ip: IpAddr, host: &str, port: u16) -> Option<Client> {
         .ok()
 }
 
+/// 执行单次探测
+///
+/// # 参数
+/// - `client`: HTTP 客户端
+/// - `trace_url`: 探测 URL
+/// - `probe_idx`: 探测索引
+///
+/// # 返回值
+/// (延迟, Colo) 元组或 None
+async fn execute_single_probe(
+    client: &Client,
+    trace_url: &str,
+    probe_idx: usize,
+) -> Option<(u128, String)> {
+    let start = Instant::now();
+    let response = match client.get(trace_url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            debug!("Probe {} failed: {}", probe_idx + 1, e);
+            return None;
+        }
+    };
+
+    let latency = start.elapsed().as_millis();
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let body = response.text().await.ok()?;
+    let colo = parse_colo(&body)?;
+    Some((latency, colo))
+}
+
 /// 执行探测循环
 ///
 /// # 参数
@@ -677,24 +714,14 @@ async fn run_probes(client: &Client, trace_url: &str) -> (Vec<u128>, usize, Stri
     let mut last_colo = String::new();
 
     for probe_idx in 0..PROBE_COUNT {
-        let start = Instant::now();
-        match client.get(trace_url).send().await {
-            Ok(response) => {
-                let latency = start.elapsed().as_millis();
-                if response.status().is_success() {
-                    if let Ok(body) = response.text().await {
-                        if let Some(colo) = parse_colo(&body) {
-                            latencies.push(latency);
-                            success_count += 1;
-                            last_colo = colo;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                debug!("Probe {} failed: {}", probe_idx + 1, e);
-            }
+        if let Some((latency, colo)) =
+            execute_single_probe(client, trace_url, probe_idx).await
+        {
+            latencies.push(latency);
+            success_count += 1;
+            last_colo = colo;
         }
+
         if probe_idx < PROBE_COUNT - 1 {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

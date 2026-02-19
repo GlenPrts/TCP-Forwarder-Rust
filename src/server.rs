@@ -54,26 +54,45 @@ pub async fn start_server(
                 break;
             }
             accept_result = listener.accept() => {
-                match accept_result {
-                    Ok((client_stream, client_addr)) => {
-                        process_new_connection(
-                            client_stream,
-                            client_addr,
-                            config.clone(),
-                            ip_manager.clone(),
-                            pool.clone(),
-                            cancel_token.clone(),
-                        ).await;
-                    }
-                    Err(e) => {
-                        error!("Failed to accept connection: {}", e);
-                    }
-                }
+                handle_accept_result(
+                    accept_result,
+                    &config,
+                    &ip_manager,
+                    &pool,
+                    &cancel_token
+                ).await;
             }
         }
     }
 
     info!("TCP server stopped");
+}
+
+/// 处理监听器接收到的连接结果
+async fn handle_accept_result(
+    accept_result: std::io::Result<(TcpStream, SocketAddr)>,
+    config: &Arc<AppConfig>,
+    ip_manager: &IpManager,
+    pool: &Option<Arc<ConnectionPool>>,
+    cancel_token: &CancellationToken,
+) {
+    let (client_stream, client_addr) = match accept_result {
+        Ok(res) => res,
+        Err(e) => {
+            error!("Failed to accept connection: {}", e);
+            return;
+        }
+    };
+
+    process_new_connection(
+        client_stream,
+        client_addr,
+        config.clone(),
+        ip_manager.clone(),
+        pool.clone(),
+        cancel_token.clone(),
+    )
+    .await;
 }
 
 /// 处理新连接请求
