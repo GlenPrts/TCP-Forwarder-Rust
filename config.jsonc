@@ -30,6 +30,8 @@
   "selection_random_n_subnets": 3,
   // 每个子网内随机生成 2 个 IP 参与竞速
   "selection_random_m_ips": 2,
+  // Happy Eyeballs 竞速连接的交错延迟（毫秒）
+  "staggered_delay_ms": 200,
 
   // --- 扫描策略 ---
   "scan_strategy": {
@@ -70,5 +72,7 @@
   // 子网质量数据最大保留数量（防止长期运行内存持续增长）
   "max_subnets": 20000,
   // 子网质量数据过期时间（秒）
-  "subnet_ttl_secs": 604800
+  "subnet_ttl_secs": 604800,
+  // 最大打开文件数（FD 限制）
+  "max_open_files": 1024
 }

@@ -55,6 +55,9 @@ pub enum ConfigError {
 
     #[error("connection_pool refill_interval_ms must be >= 100")]
     InvalidPoolRefillInterval,
+
+    #[error("staggered_delay_ms must be between 10 and 2000, got {0}")]
+    InvalidStaggeredDelay(u64),
 }
 
 /// 后台定时扫描配置
@@ -304,6 +307,10 @@ pub struct AppConfig {
     #[serde(default = "default_m_ips")]
     pub selection_random_m_ips: usize,
 
+    /// Happy Eyeballs 竞速连接的交错延迟（毫秒）
+    #[serde(default = "default_staggered_delay_ms")]
+    pub staggered_delay_ms: u64,
+
     /// 扫描策略配置
     #[serde(default)]
     pub scan_strategy: ScanStrategyConfig,
@@ -341,6 +348,10 @@ fn default_m_ips() -> usize {
     2
 }
 
+fn default_staggered_delay_ms() -> u64 {
+    200
+}
+
 fn default_max_open_files() -> usize {
     1024
 }
@@ -370,6 +381,7 @@ impl Default for AppConfig {
             selection_top_k_percent: default_top_k_percent(),
             selection_random_n_subnets: default_n_subnets(),
             selection_random_m_ips: default_m_ips(),
+            staggered_delay_ms: default_staggered_delay_ms(),
             scan_strategy: ScanStrategyConfig::default(),
             background_scan: BackgroundScanConfig::default(),
             connection_pool: ConnectionPoolConfig::default(),
@@ -410,6 +422,14 @@ impl AppConfig {
 
         if self.selection_random_m_ips == 0 {
             return Err(ConfigError::InvalidMIps.into());
+        }
+
+        if self.staggered_delay_ms < 10 || self.staggered_delay_ms > 2000 {
+            return Err(ConfigError::InvalidStaggeredDelay(self.staggered_delay_ms).into());
+        }
+
+        if self.cidr_list.is_empty() {
+            return Err(ConfigError::EmptyCidrList.into());
         }
 
         if self.cidr_list.is_empty() {
@@ -487,6 +507,19 @@ mod tests {
         let mut config = AppConfig::default();
         config.selection_random_m_ips = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_staggered_delay() {
+        let mut config = AppConfig::default();
+        config.staggered_delay_ms = 5;
+        assert!(config.validate().is_err());
+
+        config.staggered_delay_ms = 2001;
+        assert!(config.validate().is_err());
+
+        config.staggered_delay_ms = 100;
+        assert!(config.validate().is_ok());
     }
 
     #[test]
