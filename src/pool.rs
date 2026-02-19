@@ -299,31 +299,79 @@ async fn refill_to_target(
     target: usize,
 ) -> usize {
     let current = pool.current_size().await;
-    if current >= target {
+    let limit = target.min(pool.config.pool_size);
+
+    // 卫语句：已达到目标水位
+    if current >= limit {
         return 0;
     }
 
-    let need = target - current;
-    let candidates = ip_manager.get_target_ips(&config.target_colos, need.max(2), 1);
+    let need = limit - current;
+    let candidates = ip_manager.get_target_ips(
+        &config.target_colos,
+        need,
+        1,
+    );
 
+    // 卫语句：无可用候选 IP
     if candidates.is_empty() {
         debug!("No candidate IPs for pool refill");
         return 0;
     }
 
-    let mut filled = 0usize;
+    execute_refill(pool, config.target_port, ip_manager, candidates).await
+}
+
+/// 执行并发补充逻辑
+///
+/// # 参数
+/// - `pool`: 连接池
+/// - `port`: 目标端口
+/// - `ip_manager`: IP 管理器
+/// - `candidates`: 候选 IP 列表
+///
+/// # 返回值
+/// 成功建立并放入池中的连接数
+async fn execute_refill(
+    pool: &ConnectionPool,
+    port: u16,
+    ip_manager: &IpManager,
+    candidates: Vec<IpAddr>,
+) -> usize {
+    use futures::stream::{FuturesUnordered, StreamExt};
+    let mut futures = FuturesUnordered::new();
+
     for ip in candidates {
-        if pool.current_size().await >= target {
-            break;
-        }
-        let conn = pre_connect_one(ip, config.target_port, ip_manager).await;
-        if let Some(conn) = conn {
-            debug!("Pool refill: connected to {}", ip);
-            pool.push(conn).await;
-            filled += 1;
-        }
+        futures.push(pre_connect_one(ip, port, ip_manager));
+    }
+
+    let mut filled = 0;
+    while let Some(maybe_conn) = futures.next().await {
+        add_conn_to_pool(pool, maybe_conn, &mut filled).await;
     }
     filled
+}
+
+/// 将建立成功的连接加入池中
+///
+/// # 参数
+/// - `pool`: 连接池
+/// - `maybe_conn`: 可能成功的连接
+/// - `filled`: 已填充计数器
+async fn add_conn_to_pool(
+    pool: &ConnectionPool,
+    maybe_conn: Option<PooledConnection>,
+    filled: &mut usize,
+) {
+    // 卫语句：连接建立失败
+    if maybe_conn.is_none() {
+        return;
+    }
+
+    let conn = maybe_conn.unwrap();
+    debug!("Pool refill: connected to {}", conn.ip);
+    pool.push(conn).await;
+    *filled += 1;
 }
 
 /// 响应式后台连接管理循环
