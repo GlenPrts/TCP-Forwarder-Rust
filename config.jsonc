@@ -51,7 +51,7 @@
   "background_scan": {
     "enabled": true,
     // 扫描间隔（秒），最小 60
-    "interval_secs": 3600,
+    "interval_secs": 18000,
     // 并发探测数
     "concurrency": 50
   },

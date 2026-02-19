@@ -87,7 +87,8 @@ cargo clippy -- -D warnings
 - 跨任务共享状态使用 `Arc<T>`。
 - 限制并发（如扫描器中）使用 `tokio::sync::Semaphore`。
 - 优雅停机使用 `tokio_util::sync::CancellationToken`。
-- 对于大规模并发任务（如扫描），优先使用 `futures::stream::StreamExt::buffer_unordered`，而非使用 `tokio::spawn` 生成数千个任务。
+- 对于大规模并发任务（如扫描、连接池补充），优先使用 `futures::stream::FuturesUnordered` 结合 `StreamExt` 进行并行处理，而非手动 `tokio::spawn`。
+- 计算密集型任务（如统计分析、排序）使用 `Rayon` 进行并行化处理，以充分利用多核性能。
 
 ### 日志 (Logging)
 - 使用 `tracing` 库的宏: `error!`, `warn!`, `info!`, `debug!`, `trace!`。
@@ -101,7 +102,7 @@ cargo clippy -- -D warnings
 ## 实现模式 (Implementation Patterns)
 
 ### 连接竞速 (Connection Racing)
-服务器使用 "Happy Eyeballs" 风格的竞速机制 (`server.rs` 中的 `race_connections`) 来建立连接。它并行尝试多个连接，并使用第一个成功的连接。
+服务器使用 "Happy Eyeballs" 风格的竞速机制 (`server.rs` 中的 `race_connections`) 来建立连接。它通过 `staggered_delay_ms` 实现阶梯式启动，并行尝试多个连接并使用第一个成功的连接，同时立即取消其他尝试。
 
 ### 状态管理 (State Management)
 `IpManager` 是中心状态，线程安全（内部使用锁/映射），并通过 `Arc` 共享。它管理 IP 池、评分和持久化。
