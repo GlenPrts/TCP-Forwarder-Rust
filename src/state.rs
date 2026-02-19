@@ -1,10 +1,10 @@
 use crate::model::SubnetQuality;
 use crate::utils::generate_random_ip_in_subnet;
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use ipnet::IpNet;
-use parking_lot::RwLock;
 use rand::prelude::*;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ pub struct IpManager {
     /// 存储子网质量数据，以子网为键
     subnets: Arc<DashMap<IpNet, SubnetQuality>>,
     /// 最佳子网缓存（top K%）
-    best_subnets_cache: Arc<RwLock<Vec<IpNet>>>,
+    best_subnets_cache: Arc<ArcSwap<Vec<IpNet>>>,
 }
 
 impl Default for IpManager {
@@ -30,7 +30,7 @@ impl IpManager {
     pub fn new() -> Self {
         Self {
             subnets: Arc::new(DashMap::new()),
-            best_subnets_cache: Arc::new(RwLock::new(Vec::new())),
+            best_subnets_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         }
     }
 
@@ -120,8 +120,7 @@ impl IpManager {
             self.subnets.iter().map(|e| e.value().clone()).collect();
 
         if all_subnets.is_empty() {
-            let mut cache = self.best_subnets_cache.write();
-            cache.clear();
+            self.best_subnets_cache.store(Arc::new(Vec::new()));
             return;
         }
 
@@ -139,14 +138,11 @@ impl IpManager {
             top_k_percent * 100.0
         );
 
-        {
-            let mut cache = self.best_subnets_cache.write();
-            *cache = top_subnets;
-        }
+        self.best_subnets_cache.store(Arc::new(top_subnets));
     }
 
     pub fn best_cache_len(&self) -> usize {
-        self.best_subnets_cache.read().len()
+        self.best_subnets_cache.load().len()
     }
 
     /// 获取用于转发的目标 IP 列表
@@ -161,7 +157,7 @@ impl IpManager {
         n_subnets: usize,
         m_ips: usize,
     ) -> Vec<IpAddr> {
-        let best_subnets = self.best_subnets_cache.read();
+        let best_subnets = self.best_subnets_cache.load();
 
         if best_subnets.is_empty() {
             debug!("Best subnets cache is empty");
