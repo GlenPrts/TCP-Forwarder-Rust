@@ -8,7 +8,8 @@ use ipnet::IpNet;
 use rand::prelude::*;
 use std::net::IpAddr;
 use std::sync::Arc;
-use tracing::debug;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracing::{debug, warn};
 
 /// IP 管理器 - 管理子网质量数据和 IP 选择
 #[derive(Clone)]
@@ -17,6 +18,8 @@ pub struct IpManager {
     subnets: Arc<DashMap<IpNet, SubnetQuality>>,
     /// 最佳子网缓存（top K%）
     best_subnets_cache: Arc<ArcSwap<Vec<IpNet>>>,
+    /// 全局资源限制（FD 信号量）
+    fd_semaphore: Arc<Semaphore>,
 }
 
 impl Default for IpManager {
@@ -31,6 +34,7 @@ impl IpManager {
         Self {
             subnets: Arc::new(DashMap::new()),
             best_subnets_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fd_semaphore: Arc::new(Semaphore::new(1024)),
         }
     }
 
@@ -236,6 +240,34 @@ impl IpManager {
         self.subnets.len()
     }
 
+    /// 设置最大打开文件数（动态调整信号量）
+    pub fn set_max_open_files(&self, max: usize) {
+        let current = self.fd_semaphore.available_permits();
+        if max > current {
+            self.fd_semaphore.add_permits(max - current);
+            debug!("Increased FD semaphore permits to {}", max);
+            return;
+        }
+        if max < current {
+            let diff = current - max;
+            if let Ok(permit) = self.fd_semaphore.try_acquire_many(diff as u32) {
+                permit.forget();
+                debug!("Decreased FD semaphore permits to {}", max);
+                return;
+            }
+            warn!("Failed to decrease FD semaphore permits immediately");
+        }
+    }
+
+    /// 获取 FD 许可
+    pub async fn acquire_fd_permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.fd_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to acquire FD permit: {}", e))
+    }
+
     /// 保存到文件
     pub fn save_to_file(&self, path: &str) -> Result<()> {
         let subnets: Vec<SubnetQuality> = self.get_all_subnets();
@@ -287,5 +319,34 @@ mod tests {
     fn test_ip_manager_new() {
         let manager = IpManager::new();
         assert_eq!(manager.subnet_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fd_semaphore() {
+        let manager = IpManager::new();
+        manager.set_max_open_files(2);
+
+        let permit1 = manager.acquire_fd_permit().await;
+        assert!(permit1.is_ok());
+
+        let permit2 = manager.acquire_fd_permit().await;
+        assert!(permit2.is_ok());
+
+        // 第三次获取应该阻塞，我们用 timeout 测试
+        let permit3 = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            manager.acquire_fd_permit(),
+        )
+        .await;
+        assert!(permit3.is_err());
+
+        drop(permit1);
+
+        let permit3 = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            manager.acquire_fd_permit(),
+        )
+        .await;
+        assert!(permit3.is_ok());
     }
 }

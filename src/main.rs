@@ -297,6 +297,7 @@ async fn main() {
     info!("Loaded configuration: {:?}", config);
 
     let ip_manager = IpManager::new();
+    ip_manager.set_max_open_files(config.max_open_files);
 
     if cli_args.scan {
         run_scan_mode(config, ip_manager).await;

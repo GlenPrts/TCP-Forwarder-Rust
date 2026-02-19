@@ -244,10 +244,16 @@ fn configure_keepalive(stream: &TcpStream) -> std::io::Result<()> {
 /// # 参数
 /// - `ip`: 目标 IP
 /// - `port`: 目标端口
+/// - `ip_manager`: IP 管理器
 ///
 /// # 返回值
 /// 成功返回池化连接，失败返回 None
-async fn pre_connect_one(ip: IpAddr, port: u16) -> Option<PooledConnection> {
+async fn pre_connect_one(
+    ip: IpAddr,
+    port: u16,
+    ip_manager: &IpManager,
+) -> Option<PooledConnection> {
+    let _permit = ip_manager.acquire_fd_permit().await.ok();
     let addr = SocketAddr::new(ip, port);
     let connect_result = timeout(
         Duration::from_millis(PRE_CONNECT_TIMEOUT_MS),
@@ -310,7 +316,7 @@ async fn refill_to_target(
         if pool.current_size().await >= target {
             break;
         }
-        let conn = pre_connect_one(ip, config.target_port).await;
+        let conn = pre_connect_one(ip, config.target_port, ip_manager).await;
         if let Some(conn) = conn {
             debug!("Pool refill: connected to {}", ip);
             pool.push(conn).await;

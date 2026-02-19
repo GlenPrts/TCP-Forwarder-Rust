@@ -128,6 +128,7 @@ async fn run_full_scan(
         effective_concurrency,
         &config.trace_url,
         subnet_results.clone(),
+        &ip_manager,
     )
     .await;
 
@@ -165,7 +166,7 @@ async fn run_adaptive_scan(
     let effective_concurrency = concurrency.max(50);
 
     let (initial_success, initial_total, initial_results) =
-        run_initial_scan(&config, effective_concurrency, root_cidrs).await;
+        run_initial_scan(&config, &ip_manager, effective_concurrency, root_cidrs).await;
 
     let hot_spots = analyze_hot_spots(
         initial_results,
@@ -182,7 +183,7 @@ async fn run_adaptive_scan(
     }
 
     let (focused_success, focused_total, focused_results) =
-        run_focused_scan(&config, effective_concurrency, &hot_spots).await;
+        run_focused_scan(&config, &ip_manager, effective_concurrency, &hot_spots).await;
 
     let top_k = config.selection_top_k_percent;
     let updated_subnets = aggregate_and_persist(focused_results, &ip_manager, &config, top_k);
@@ -205,6 +206,7 @@ async fn run_adaptive_scan(
 /// (成功数, 总数, 扫描结果)
 async fn run_initial_scan(
     config: &AppConfig,
+    ip_manager: &IpManager,
     concurrency_limit: usize,
     root_cidrs: &[IpNet],
 ) -> (usize, usize, Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>) {
@@ -231,6 +233,7 @@ async fn run_initial_scan(
         concurrency_limit,
         &config.trace_url,
         results.clone(),
+        ip_manager,
     )
     .await;
 
@@ -296,6 +299,7 @@ fn analyze_hot_spots(
 /// (成功数, 总数, 扫描结果)
 async fn run_focused_scan(
     config: &AppConfig,
+    ip_manager: &IpManager,
     concurrency_limit: usize,
     hot_spots: &[IpNet],
 ) -> (usize, usize, Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>) {
@@ -321,6 +325,7 @@ async fn run_focused_scan(
         concurrency_limit,
         &config.trace_url,
         results.clone(),
+        ip_manager,
     )
     .await;
 
@@ -451,6 +456,7 @@ async fn execute_scan_stream(
     concurrency_limit: usize,
     trace_url: &str,
     results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
+    ip_manager: &IpManager,
 ) -> (usize, usize) {
     if targets.is_empty() {
         return (0, 0);
@@ -470,7 +476,9 @@ async fn execute_scan_stream(
         .map(|(subnet, ip)| {
             let url_ref = trace_url_arc.clone();
             let host_ref = host_arc.clone();
+            let manager = ip_manager.clone();
             async move {
+                let _permit = manager.acquire_fd_permit().await.ok();
                 let quality = test_ip(ip, &url_ref, &host_ref, port).await;
                 (subnet, quality)
             }

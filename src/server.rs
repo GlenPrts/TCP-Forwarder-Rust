@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::copy_bidirectional_with_sizes;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -25,8 +24,6 @@ const BUFFER_SIZE: usize = 65536;
 const KEEPALIVE_TIME_SECS: u64 = 60;
 /// TCP Keepalive 探测间隔（秒）
 const KEEPALIVE_INTERVAL_SECS: u64 = 10;
-/// 最大并发连接数
-const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 
 /// 启动 TCP 转发服务器
 ///
@@ -50,8 +47,6 @@ pub async fn start_server(
 
     info!("TCP Forwarder listening on {}", config.bind_addr);
 
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
-
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -67,7 +62,6 @@ pub async fn start_server(
                             config.clone(),
                             ip_manager.clone(),
                             pool.clone(),
-                            semaphore.clone(),
                             cancel_token.clone(),
                         ).await;
                     }
@@ -89,7 +83,6 @@ pub async fn start_server(
 /// - `addr`: 客户端地址
 /// - `config`: 配置
 /// - `ip_manager`: IP 管理器
-/// - `semaphore`: 并发信号量
 /// - `cancel_token`: 取消令牌
 async fn process_new_connection(
     stream: TcpStream,
@@ -97,7 +90,6 @@ async fn process_new_connection(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
     pool: Option<Arc<ConnectionPool>>,
-    semaphore: Arc<Semaphore>,
     cancel_token: CancellationToken,
 ) {
     debug!("Accepted connection from {}", addr);
@@ -105,7 +97,7 @@ async fn process_new_connection(
     // 获取并发许可，支持取消
     let permit = tokio::select! {
         _ = cancel_token.cancelled() => return,
-        p = semaphore.acquire_owned() => match p {
+        p = ip_manager.acquire_fd_permit() => match p {
             Ok(p) => p,
             Err(_) => return,
         }
@@ -241,7 +233,9 @@ async fn connect_via_race(
         client_addr
     );
 
-    if let Some(result) = race_connections(&candidate_ips, config.target_port).await {
+    if let Some(result) =
+        race_connections(&candidate_ips, config.target_port, ip_manager).await
+    {
         info!(
             "Fastest connection: {} for {} ({:?})",
             result.ip, client_addr, result.connect_time
@@ -259,7 +253,7 @@ async fn connect_via_race(
         return Err(anyhow::anyhow!("No available IPs for fallback"));
     }
 
-    connect_with_fallback(fallback_ips[0], config.target_port).await
+    connect_with_fallback(fallback_ips[0], config.target_port, ip_manager).await
 }
 
 /// 尝试单个连接
@@ -274,6 +268,7 @@ async fn connect_via_race(
 async fn try_connect_single(
     ip: IpAddr,
     port: u16,
+    ip_manager: &IpManager,
     cancel_token: CancellationToken,
 ) -> Option<ConnectionResult> {
     let target_addr = SocketAddr::new(ip, port);
@@ -284,6 +279,7 @@ async fn try_connect_single(
             None
         }
         result = async {
+            let _permit = ip_manager.acquire_fd_permit().await.ok();
             let start = Instant::now();
             let connect_result = timeout(
                 Duration::from_millis(CONNECT_TIMEOUT_MS),
@@ -345,7 +341,11 @@ async fn await_first_success(
 ///
 /// # 返回值
 /// - `Option<ConnectionResult>`: 最快建立的连接
-async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<ConnectionResult> {
+async fn race_connections(
+    candidate_ips: &[IpAddr],
+    target_port: u16,
+    ip_manager: &IpManager,
+) -> Option<ConnectionResult> {
     if candidate_ips.is_empty() {
         return None;
     }
@@ -354,7 +354,12 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
     let tasks = FuturesUnordered::new();
 
     for &ip in candidate_ips {
-        tasks.push(try_connect_single(ip, target_port, cancel_token.clone()));
+        tasks.push(try_connect_single(
+            ip,
+            target_port,
+            ip_manager,
+            cancel_token.clone(),
+        ));
     }
 
     await_first_success(tasks, cancel_token).await
@@ -368,7 +373,12 @@ async fn race_connections(candidate_ips: &[IpAddr], target_port: u16) -> Option<
 ///
 /// # 返回值
 /// - `anyhow::Result<TcpStream>`: 建立的 TCP 连接
-async fn connect_with_fallback(ip: IpAddr, port: u16) -> anyhow::Result<TcpStream> {
+async fn connect_with_fallback(
+    ip: IpAddr,
+    port: u16,
+    ip_manager: &IpManager,
+) -> anyhow::Result<TcpStream> {
+    let _permit = ip_manager.acquire_fd_permit().await.ok();
     let target_addr = SocketAddr::new(ip, port);
 
     match timeout(

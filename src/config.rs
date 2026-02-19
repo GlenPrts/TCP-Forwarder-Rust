@@ -316,6 +316,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub connection_pool: ConnectionPoolConfig,
 
+    /// 最大打开文件数（FD 限制）
+    #[serde(default = "default_max_open_files")]
+    pub max_open_files: usize,
+
     /// 子网质量数据最大保留数量（防止长期运行内存持续增长）
     #[serde(default = "default_max_subnets")]
     pub max_subnets: usize,
@@ -335,6 +339,10 @@ fn default_n_subnets() -> usize {
 
 fn default_m_ips() -> usize {
     2
+}
+
+fn default_max_open_files() -> usize {
+    1024
 }
 
 fn default_max_subnets() -> usize {
@@ -365,6 +373,7 @@ impl Default for AppConfig {
             scan_strategy: ScanStrategyConfig::default(),
             background_scan: BackgroundScanConfig::default(),
             connection_pool: ConnectionPoolConfig::default(),
+            max_open_files: default_max_open_files(),
             max_subnets: default_max_subnets(),
             subnet_ttl_secs: default_subnet_ttl_secs(),
         }
@@ -433,6 +442,10 @@ impl AppConfig {
 
         if self.max_subnets == 0 {
             return Err(anyhow::anyhow!("max_subnets must be > 0"));
+        }
+
+        if self.max_open_files == 0 {
+            return Err(anyhow::anyhow!("max_open_files must be > 0"));
         }
 
         Ok(())
