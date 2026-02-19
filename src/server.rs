@@ -125,8 +125,7 @@ async fn process_new_connection(
     tokio::spawn(async move {
         // 保持许可直到任务结束
         let _permit = permit;
-        let result =
-            handle_connection(stream, addr, config, ip_manager, pool).await;
+        let result = handle_connection(stream, addr, config, ip_manager, pool).await;
         if let Err(e) = result {
             debug!("Connection handling error for {}: {}", addr, e);
         }
@@ -161,8 +160,7 @@ async fn handle_connection(
     let _ = client_stream.set_nodelay(true);
     let _ = configure_keepalive(&client_stream);
 
-    let mut remote_stream =
-        connect_to_remote(&config, &ip_manager, &pool, client_addr).await?;
+    let mut remote_stream = connect_to_remote(&config, &ip_manager, &pool, client_addr).await?;
 
     // 连接关闭后 peer_addr() 可能失败，提前保存
     let peer = remote_stream
@@ -286,10 +284,7 @@ fn handle_no_ips(config: &AppConfig) -> anyhow::Error {
 }
 
 /// 执行回退连接
-async fn perform_fallback(
-    config: &AppConfig,
-    ip_manager: &IpManager,
-) -> anyhow::Result<TcpStream> {
+async fn perform_fallback(config: &AppConfig, ip_manager: &IpManager) -> anyhow::Result<TcpStream> {
     let fallback_ips = ip_manager.get_target_ips(&config.target_colos, 1, 1);
 
     if fallback_ips.is_empty() {

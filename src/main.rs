@@ -308,10 +308,8 @@ async fn main() {
     let manager = ip_manager.clone();
     let path = config.ip_store_file.clone();
     let top_k = config.selection_top_k_percent;
-    let load_result = tokio::task::spawn_blocking(move || {
-        manager.load_from_file(&path, top_k)
-    })
-    .await;
+    let load_result =
+        tokio::task::spawn_blocking(move || manager.load_from_file(&path, top_k)).await;
 
     match load_result {
         Ok(Ok(_)) => info!("Loaded IPs from {}", config.ip_store_file),

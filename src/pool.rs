@@ -213,9 +213,7 @@ impl ConnectionPool {
         let to_keep = items.len();
 
         // 如果放回会导致超过 pool_size，则丢弃最旧的（即 items 的头部）
-        while items.len() + queue.len() > self.config.pool_size 
-            && !items.is_empty() 
-        {
+        while items.len() + queue.len() > self.config.pool_size && !items.is_empty() {
             items.pop_front();
             self.stats.evicted.fetch_add(1, Ordering::Relaxed);
         }
@@ -226,7 +224,9 @@ impl ConnectionPool {
         }
 
         if expired_count > 0 {
-            self.stats.expired.fetch_add(expired_count, Ordering::Relaxed);
+            self.stats
+                .expired
+                .fetch_add(expired_count, Ordering::Relaxed);
         }
         if dead_count > 0 {
             self.stats.dead.fetch_add(dead_count, Ordering::Relaxed);
@@ -337,11 +337,7 @@ async fn refill_to_target(
     }
 
     let need = limit - current;
-    let candidates = ip_manager.get_target_ips(
-        &config.target_colos,
-        need,
-        1,
-    );
+    let candidates = ip_manager.get_target_ips(&config.target_colos, need, 1);
 
     // 卫语句：无可用候选 IP
     if candidates.is_empty() {
@@ -427,10 +423,7 @@ pub async fn run_refill_loop(
     info!(
         "Connection pool started \
          (max={}, min_idle={}, idle={}s, interval={}ms)",
-        pool.config.pool_size,
-        min_idle,
-        pool.config.max_idle_secs,
-        pool.config.refill_interval_ms,
+        pool.config.pool_size, min_idle, pool.config.max_idle_secs, pool.config.refill_interval_ms,
     );
 
     // 启动时先填充到 min_idle
@@ -489,10 +482,7 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
-    async fn create_test_conn(
-        ip: &str,
-        server_addr: SocketAddr,
-    ) -> PooledConnection {
+    async fn create_test_conn(ip: &str, server_addr: SocketAddr) -> PooledConnection {
         let stream = TcpStream::connect(server_addr).await.unwrap();
         PooledConnection {
             stream,
@@ -584,7 +574,7 @@ mod tests {
         let pool = ConnectionPool::new(config);
 
         pool.push(create_test_conn("1.1.1.1", addr).await).await;
-        
+
         let mut conn2 = create_test_conn("2.2.2.2", addr).await;
         // 手动设置过期时间
         conn2.created_at = Instant::now() - Duration::from_secs(2);
@@ -608,4 +598,3 @@ mod tests {
         assert_eq!(ip, "1.1.1.1".parse::<IpAddr>().unwrap());
     }
 }
-

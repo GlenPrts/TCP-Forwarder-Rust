@@ -9,10 +9,10 @@ use futures::stream::{Stream, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use ipnet::IpNet;
 use parking_lot::Mutex;
-use rayon::prelude::*;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rayon::prelude::*;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -115,11 +115,10 @@ async fn run_full_scan(
 ) -> ScanStats {
     let mask = FOCUSED_SCAN_SUBNET_MASK;
     let root_cidrs_vec = root_cidrs.to_vec();
-    let target_subnets = tokio::task::spawn_blocking(move || {
-        split_cidrs_to_subnets(root_cidrs_vec, mask)
-    })
-    .await
-    .unwrap_or_default();
+    let target_subnets =
+        tokio::task::spawn_blocking(move || split_cidrs_to_subnets(root_cidrs_vec, mask))
+            .await
+            .unwrap_or_default();
     info!("Total target subnets to scan: {}", target_subnets.len());
 
     let samples = config.scan_strategy.focused_samples_per_subnet;
@@ -183,11 +182,10 @@ async fn run_adaptive_scan(
         run_initial_scan(&config, &ip_manager, effective_concurrency, root_cidrs).await;
 
     let promising_percent = config.scan_strategy.promising_subnet_percent;
-    let hot_spots = tokio::task::spawn_blocking(move || {
-        analyze_hot_spots(initial_results, promising_percent)
-    })
-    .await
-    .unwrap_or_default();
+    let hot_spots =
+        tokio::task::spawn_blocking(move || analyze_hot_spots(initial_results, promising_percent))
+            .await
+            .unwrap_or_default();
 
     if hot_spots.is_empty() {
         warn!("No promising subnets found in phase 1. Aborting scan.");
@@ -237,11 +235,9 @@ async fn run_initial_scan(
     info!("[Phase 1/3] Starting wide and sparse scan...");
     let mask = strategy.initial_scan_mask;
     let root_cidrs_vec = root_cidrs.to_vec();
-    let subnets = tokio::task::spawn_blocking(move || {
-        split_cidrs_to_subnets(root_cidrs_vec, mask)
-    })
-    .await
-    .unwrap_or_default();
+    let subnets = tokio::task::spawn_blocking(move || split_cidrs_to_subnets(root_cidrs_vec, mask))
+        .await
+        .unwrap_or_default();
     info!(
         "[Phase 1/3] Split into {} /{} subnets.",
         subnets.len(),
@@ -607,7 +603,7 @@ async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
         if let Ok(cidrs) = result {
             return Ok(cidrs);
         }
-        
+
         let e = result.unwrap_err();
         warn!("Failed to fetch ASN (try {}): {}", attempt, e);
         last_error = Some(e);
@@ -617,9 +613,7 @@ async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
         }
     }
 
-    let err = last_error.unwrap_or_else(|| {
-        anyhow::anyhow!("Unknown error fetching ASN CIDRs")
-    });
+    let err = last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
     Err(err)
 }
 
@@ -714,9 +708,7 @@ async fn run_probes(client: &Client, trace_url: &str) -> (Vec<u128>, usize, Stri
     let mut last_colo = String::new();
 
     for probe_idx in 0..PROBE_COUNT {
-        if let Some((latency, colo)) =
-            execute_single_probe(client, trace_url, probe_idx).await
-        {
+        if let Some((latency, colo)) = execute_single_probe(client, trace_url, probe_idx).await {
             latencies.push(latency);
             success_count += 1;
             last_colo = colo;

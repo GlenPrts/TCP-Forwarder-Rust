@@ -59,7 +59,7 @@
   // --- 预连接池 ---
   // CF 空闲 TCP 约 15s 后关闭，据此调参
   "connection_pool": {
-    "enabled": true,
+    "enabled": false,
     // 池容量上限
     "pool_size": 16,
     // 后台定时维持的最小空闲连接数
