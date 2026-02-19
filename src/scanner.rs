@@ -3,11 +3,14 @@ use crate::model::{IpQuality, SubnetQuality};
 use crate::state::IpManager;
 use crate::utils::generate_random_ip_in_subnet;
 use anyhow::Result;
+use async_stream::stream;
 use chrono::Utc;
-use futures::stream::{self, StreamExt};
+use futures::stream::{Stream, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use ipnet::IpNet;
 use parking_lot::Mutex;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -113,18 +116,20 @@ async fn run_full_scan(
     info!("Total target subnets to scan: {}", target_subnets.len());
 
     let samples = config.scan_strategy.focused_samples_per_subnet;
-    let targets = generate_scan_targets(&target_subnets, samples);
-    info!("Created {} scan targets", targets.len());
+    let total_count = target_subnets.len() * samples;
+    let targets = generate_scan_targets_stream(target_subnets, samples);
+    info!("Created {} scan targets", total_count);
 
     let subnet_results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
-        Arc::new(Mutex::new(HashMap::with_capacity(target_subnets.len())));
+        Arc::new(Mutex::new(HashMap::with_capacity(100))); // 初始容量设为 100
 
     // 保证最低并发数为 50
     let effective_concurrency = concurrency.max(50);
     info!("Scanning with concurrency limit: {}", effective_concurrency);
 
     let (success_count, total_scanned) = execute_scan_stream(
-        targets,
+        Box::pin(targets),
+        total_count,
         effective_concurrency,
         &config.trace_url,
         subnet_results.clone(),
@@ -222,14 +227,16 @@ async fn run_initial_scan(
     );
 
     let samples = strategy.initial_samples_per_subnet;
-    let targets = generate_scan_targets(&subnets, samples);
-    info!("[Phase 1/3] Created {} scan targets.", targets.len());
+    let total_count = subnets.len() * samples;
+    let targets = generate_scan_targets_stream(subnets, samples);
+    info!("[Phase 1/3] Created {} scan targets.", total_count);
 
     let results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
-        Arc::new(Mutex::new(HashMap::with_capacity(subnets.len())));
+        Arc::new(Mutex::new(HashMap::with_capacity(100)));
 
     let (success, total) = execute_scan_stream(
-        targets,
+        Box::pin(targets),
+        total_count,
         concurrency_limit,
         &config.trace_url,
         results.clone(),
@@ -314,14 +321,16 @@ async fn run_focused_scan(
     );
 
     let samples = strategy.focused_samples_per_subnet;
-    let targets = generate_scan_targets(&subnets, samples);
-    info!("[Phase 3/3] Created {} scan targets.", targets.len());
+    let total_count = subnets.len() * samples;
+    let targets = generate_scan_targets_stream(subnets, samples);
+    info!("[Phase 3/3] Created {} scan targets.", total_count);
 
     let results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>> =
-        Arc::new(Mutex::new(HashMap::with_capacity(subnets.len())));
+        Arc::new(Mutex::new(HashMap::with_capacity(100)));
 
     let (success, total) = execute_scan_stream(
-        targets,
+        Box::pin(targets),
+        total_count,
         concurrency_limit,
         &config.trace_url,
         results.clone(),
@@ -380,26 +389,27 @@ fn aggregate_and_persist(
     updated
 }
 
-/// 生成扫描目标
+/// 生成扫描目标流
 ///
 /// # 参数
 /// - `subnets`: 子网列表
 /// - `samples`: 每个子网的采样数
 ///
 /// # 返回值
-/// (子网, IP) 元组列表
-fn generate_scan_targets(subnets: &[IpNet], samples: usize) -> Vec<(IpNet, IpAddr)> {
-    let mut targets = Vec::with_capacity(subnets.len() * samples);
-    let mut rng = rand::thread_rng();
-
-    for subnet in subnets {
-        for _ in 0..samples {
-            let ip = generate_random_ip_in_subnet(subnet, &mut rng);
-            targets.push((*subnet, ip));
+/// (子网, IP) 元组流
+fn generate_scan_targets_stream(
+    subnets: Vec<IpNet>,
+    samples: usize,
+) -> impl Stream<Item = (IpNet, IpAddr)> {
+    stream! {
+        let mut rng = StdRng::from_entropy();
+        for subnet in subnets {
+            for _ in 0..samples {
+                let ip = generate_random_ip_in_subnet(&subnet, &mut rng);
+                yield (subnet, ip);
+            }
         }
     }
-
-    targets
 }
 
 /// 创建进度条
@@ -444,25 +454,30 @@ fn flush_batch(
 /// 执行流式扫描
 ///
 /// # 参数
-/// - `targets`: 扫描目标列表
+/// - `targets`: 扫描目标流
+/// - `total_count`: 总扫描数
 /// - `concurrency_limit`: 并发限制
 /// - `trace_url`: 探测 URL
 /// - `results`: 结果存储容器
 ///
 /// # 返回值
 /// (成功数, 总扫描数)
-async fn execute_scan_stream(
-    targets: Vec<(IpNet, IpAddr)>,
+async fn execute_scan_stream<S>(
+    targets: S,
+    total_count: usize,
     concurrency_limit: usize,
     trace_url: &str,
     results: Arc<Mutex<HashMap<IpNet, Vec<IpQuality>>>>,
     ip_manager: &IpManager,
-) -> (usize, usize) {
-    if targets.is_empty() {
+) -> (usize, usize)
+where
+    S: Stream<Item = (IpNet, IpAddr)> + Unpin,
+{
+    if total_count == 0 {
         return (0, 0);
     }
 
-    let pb = create_progress_bar(targets.len() as u64);
+    let pb = create_progress_bar(total_count as u64);
     let url = match reqwest::Url::parse(trace_url) {
         Ok(u) => u,
         Err(_) => return (0, 0),
@@ -472,7 +487,7 @@ async fn execute_scan_stream(
     let trace_url_arc = Arc::new(trace_url.to_string());
     let host_arc = Arc::new(host);
 
-    let mut stream = stream::iter(targets)
+    let mut stream = targets
         .map(|(subnet, ip)| {
             let url_ref = trace_url_arc.clone();
             let host_ref = host_arc.clone();

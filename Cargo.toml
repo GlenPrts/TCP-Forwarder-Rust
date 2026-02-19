@@ -26,6 +26,7 @@ socket2 = "0.5"
 futures = "0.3"
 indicatif = "0.17"
 json_comments = "0.2.2"
+async-stream = "0.3"
 
 [profile.release]
 lto = true
