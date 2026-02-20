@@ -2,7 +2,10 @@ use crate::config::AppConfig;
 use crate::model::SubnetQuality;
 use crate::pool::ConnectionPool;
 use crate::state::IpManager;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::State, http::StatusCode, response::IntoResponse, routing::get,
+    Json, Router,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -101,7 +104,9 @@ async fn get_status(State(state): State<AppState>) -> Json<Vec<SubnetQuality>> {
     Json(subnets)
 }
 
-async fn get_subnets_api(State(state): State<AppState>) -> Json<StatusResponse> {
+async fn get_subnets_api(
+    State(state): State<AppState>,
+) -> Json<StatusResponse> {
     let mut subnets: Vec<SubnetQuality> = state.ip_manager.get_all_subnets();
     subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
 

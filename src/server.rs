@@ -20,10 +20,6 @@ const SELECTION_TIMEOUT_MS: u64 = 2000;
 const FALLBACK_TIMEOUT_SECS: u64 = 5;
 /// 缓冲区大小 64KB
 const BUFFER_SIZE: usize = 65536;
-/// TCP Keepalive 空闲时间（秒）
-const KEEPALIVE_TIME_SECS: u64 = 60;
-/// TCP Keepalive 探测间隔（秒）
-const KEEPALIVE_INTERVAL_SECS: u64 = 10;
 
 /// 启动 TCP 转发服务器
 ///
@@ -125,7 +121,8 @@ async fn process_new_connection(
     tokio::spawn(async move {
         // 保持许可直到任务结束
         let _permit = permit;
-        let result = handle_connection(stream, addr, config, ip_manager, pool).await;
+        let result =
+            handle_connection(stream, addr, config, ip_manager, pool).await;
         if let Err(e) = result {
             debug!("Connection handling error for {}: {}", addr, e);
         }
@@ -158,9 +155,10 @@ async fn handle_connection(
 ) -> anyhow::Result<()> {
     // P0 Bug fix: 配置 Keepalive 和 NODELAY
     let _ = client_stream.set_nodelay(true);
-    let _ = configure_keepalive(&client_stream);
+    let _ = configure_keepalive(&client_stream, &config);
 
-    let mut remote_stream = connect_to_remote(&config, &ip_manager, &pool, client_addr).await?;
+    let mut remote_stream =
+        connect_to_remote(&config, &ip_manager, &pool, client_addr).await?;
 
     // 连接关闭后 peer_addr() 可能失败，提前保存
     let peer = remote_stream
@@ -177,12 +175,14 @@ async fn handle_connection(
     )
     .await;
 
-    if let Err(e) = copy_result {
-        debug!("Connection error with {}: {}", client_addr, e);
-        return Ok(());
-    }
+    let (bytes_tx, bytes_rx) = match copy_result {
+        Ok(res) => res,
+        Err(e) => {
+            debug!("Connection error with {}: {}", client_addr, e);
+            return Ok(());
+        }
+    };
 
-    let (bytes_tx, bytes_rx) = copy_result.unwrap();
     info!(
         "Connection closed: {} -> {} (TX: {} bytes, RX: {} bytes)",
         client_addr, peer, bytes_tx, bytes_rx
@@ -218,7 +218,7 @@ async fn connect_to_remote(
 
     // 延迟配置：仅对竞速胜出者（非池化连接）进行配置
     let _ = stream.set_nodelay(true);
-    let _ = configure_keepalive(&stream);
+    let _ = configure_keepalive(&stream, config);
 
     Ok(stream)
 }
@@ -284,7 +284,10 @@ fn handle_no_ips(config: &AppConfig) -> anyhow::Error {
 }
 
 /// 执行回退连接
-async fn perform_fallback(config: &AppConfig, ip_manager: &IpManager) -> anyhow::Result<TcpStream> {
+async fn perform_fallback(
+    config: &AppConfig,
+    ip_manager: &IpManager,
+) -> anyhow::Result<TcpStream> {
     let fallback_ips = ip_manager.get_target_ips(&config.target_colos, 1, 1);
 
     if fallback_ips.is_empty() {
@@ -459,13 +462,17 @@ async fn connect_with_fallback(
 ///
 /// # 参数
 /// - `stream`: TCP 连接流
+/// - `config`: 应用配置
 ///
 /// # 返回值
 /// - `std::io::Result<()>`: 配置结果
-fn configure_keepalive(stream: &TcpStream) -> std::io::Result<()> {
+fn configure_keepalive(
+    stream: &TcpStream,
+    config: &AppConfig,
+) -> std::io::Result<()> {
     let socket_ref = SockRef::from(stream);
     let keepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(KEEPALIVE_TIME_SECS))
-        .with_interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
+        .with_time(Duration::from_secs(config.tcp_keepalive.time_secs))
+        .with_interval(Duration::from_secs(config.tcp_keepalive.interval_secs));
     socket_ref.set_tcp_keepalive(&keepalive)
 }

@@ -67,6 +67,10 @@
     "max_idle_secs": 12,
     // 定时清理 + 水位检查间隔（毫秒）
     "refill_interval_ms": 4000
+  },
+  "tcp_keepalive": {
+    "time_secs": 60,
+    "interval_secs": 10
   }
 }
 ```
@@ -102,6 +106,9 @@
     *   `min_idle`: 后台定时维持的最小空闲连接数（默认 2，不得超过 pool_size）。
     *   `max_idle_secs`: 连接最大空闲时间，单位秒（默认 12，最小 5）。Cloudflare 约 15 秒关闭空闲连接，建议设为 12 以留余量。
     *   `refill_interval_ms`: 后台定时清理和水位检查的间隔，单位毫秒（默认 5000，最小 100）。
+*   **TCP Keepalive (`tcp_keepalive`)**:
+    *   `time_secs`: Keepalive 空闲时间（秒）（默认 60）。
+    *   `interval_secs`: Keepalive 探测间隔（秒）（默认 10）。
 
 **注意**：配置文件支持 JSONC 格式（允许 `//` 和 `/* */` 注释）。所有配置参数均会自动验证，不合法时程序拒绝启动并显示错误消息。
 
@@ -160,6 +167,21 @@ cargo build --release
 构建产物位于 `target/release/tcp-forwarder-rust` (Linux/macOS) 或 `target/release/tcp-forwarder-rust.exe` (Windows)。
 
 ## 最近改进
+
+### v0.2.7 (2026-02-20)
+
+**核心改进：**
+
+1.  **架构与并发性能优化**:
+    - **锁性能优化**：移除了预连接池中低效且不合理的异步锁 `tokio::sync::Mutex`，替换为无锁等待的高性能同步锁 `parking_lot::Mutex`，消除了协程调度开销。
+    - **指数退避重试 (Exponential Backoff)**：连接池补充失败时引入退避机制（最高退避至 30 秒），防止 Cloudflare 节点宕机时导致的 CPU 打满和句柄耗尽。
+    - **消除异步阻塞 I/O**：将扫描结果持久化等磁盘 I/O 操作转移到 `tokio::task::spawn_blocking` 中执行，避免阻塞 Tokio Reactor 线程。
+    - **TCP Keepalive 可配置化**：将探活时间与间隔提取到全局配置 `tcp_keepalive` 中，适应不同网络 NAT 老化环境。
+
+2.  **严格的代码规范审计**:
+    - **消除反模式**：彻底重构了为规避 `else` 导致的 `.unwrap()` 滥用，采用安全的前置卫语句 (`match` 提前返回) 模式。
+    - **大函数与复杂度拆分**：根据“单一职责”原则，重构拆分了原先超过 60 行阈值的大函数（如 `AppConfig::validate` 等）。
+    - 修正了部分行宽超过 80 字符的长链式调用。
 
 ### v0.2.6 (2026-02-19)
 

@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, ConnectionPoolConfig};
 use crate::state::IpManager;
+use parking_lot::Mutex;
 use socket2::{SockRef, TcpKeepalive};
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
@@ -10,17 +11,13 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 /// 单个预连接的超时时间（毫秒）
 const PRE_CONNECT_TIMEOUT_MS: u64 = 2000;
-/// TCP Keepalive 空闲时间（秒）
-const KEEPALIVE_TIME_SECS: u64 = 60;
-/// TCP Keepalive 探测间隔（秒）
-const KEEPALIVE_INTERVAL_SECS: u64 = 10;
 
 /// 池化连接包装
 struct PooledConnection {
@@ -113,13 +110,14 @@ impl ConnectionPool {
 
         loop {
             let mut conn = {
-                let mut queue = self.conns.lock().await;
-                let conn = queue.pop_back();
-                if conn.is_none() {
-                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                    return None;
+                let mut queue = self.conns.lock();
+                match queue.pop_back() {
+                    Some(c) => c,
+                    None => {
+                        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
                 }
-                conn.unwrap()
             };
 
             if !self.is_conn_fresh(&conn) {
@@ -141,7 +139,7 @@ impl ConnectionPool {
 
     /// 获取连接池统计快照
     pub async fn snapshot(&self) -> PoolStatsSnapshot {
-        let queue = self.conns.lock().await;
+        let queue = self.conns.lock();
         PoolStatsSnapshot {
             pool_size: queue.len(),
             total_acquired: self.stats.total_acquired.load(Ordering::Relaxed),
@@ -156,7 +154,7 @@ impl ConnectionPool {
 
     /// 获取当前池中连接数
     async fn current_size(&self) -> usize {
-        self.conns.lock().await.len()
+        self.conns.lock().len()
     }
 
     /// 检查连接是否在有效期内
@@ -169,7 +167,7 @@ impl ConnectionPool {
     ///
     /// 如果池已满则丢弃最老的连接。
     async fn push(&self, conn: PooledConnection) {
-        let mut queue = self.conns.lock().await;
+        let mut queue = self.conns.lock();
         if queue.len() >= self.config.pool_size {
             queue.pop_front();
             self.stats.evicted.fetch_add(1, Ordering::Relaxed);
@@ -186,7 +184,7 @@ impl ConnectionPool {
     /// 本次清理移除的连接数
     async fn purge_stale(&self) -> usize {
         let mut items = {
-            let mut queue = self.conns.lock().await;
+            let mut queue = self.conns.lock();
             if queue.is_empty() {
                 return 0;
             }
@@ -209,11 +207,13 @@ impl ConnectionPool {
             true
         });
 
-        let mut queue = self.conns.lock().await;
+        let mut queue = self.conns.lock();
         let to_keep = items.len();
 
         // 如果放回会导致超过 pool_size，则丢弃最旧的（即 items 的头部）
-        while items.len() + queue.len() > self.config.pool_size && !items.is_empty() {
+        while items.len() + queue.len() > self.config.pool_size
+            && !items.is_empty()
+        {
             items.pop_front();
             self.stats.evicted.fetch_add(1, Ordering::Relaxed);
         }
@@ -261,11 +261,14 @@ fn is_stream_alive(stream: &mut TcpStream) -> bool {
 }
 
 /// 配置 TCP Keepalive
-fn configure_keepalive(stream: &TcpStream) -> std::io::Result<()> {
+fn configure_keepalive(
+    stream: &TcpStream,
+    config: &AppConfig,
+) -> std::io::Result<()> {
     let socket_ref = SockRef::from(stream);
     let keepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(KEEPALIVE_TIME_SECS))
-        .with_interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
+        .with_time(Duration::from_secs(config.tcp_keepalive.time_secs))
+        .with_interval(Duration::from_secs(config.tcp_keepalive.interval_secs));
     socket_ref.set_tcp_keepalive(&keepalive)
 }
 
@@ -274,6 +277,7 @@ fn configure_keepalive(stream: &TcpStream) -> std::io::Result<()> {
 /// # 参数
 /// - `ip`: 目标 IP
 /// - `port`: 目标端口
+/// - `config`: 应用配置
 /// - `ip_manager`: IP 管理器
 ///
 /// # 返回值
@@ -281,6 +285,7 @@ fn configure_keepalive(stream: &TcpStream) -> std::io::Result<()> {
 async fn pre_connect_one(
     ip: IpAddr,
     port: u16,
+    config: &AppConfig,
     ip_manager: &IpManager,
 ) -> Option<PooledConnection> {
     let _permit = ip_manager.acquire_fd_permit().await.ok();
@@ -304,7 +309,7 @@ async fn pre_connect_one(
     };
 
     let _ = stream.set_nodelay(true);
-    let _ = configure_keepalive(&stream);
+    let _ = configure_keepalive(&stream, config);
     Some(PooledConnection {
         stream,
         ip,
@@ -345,14 +350,14 @@ async fn refill_to_target(
         return 0;
     }
 
-    execute_refill(pool, config.target_port, ip_manager, candidates).await
+    execute_refill(pool, config, ip_manager, candidates).await
 }
 
 /// 执行并发补充逻辑
 ///
 /// # 参数
 /// - `pool`: 连接池
-/// - `port`: 目标端口
+/// - `config`: 应用配置
 /// - `ip_manager`: IP 管理器
 /// - `candidates`: 候选 IP 列表
 ///
@@ -360,7 +365,7 @@ async fn refill_to_target(
 /// 成功建立并放入池中的连接数
 async fn execute_refill(
     pool: &ConnectionPool,
-    port: u16,
+    config: &AppConfig,
     ip_manager: &IpManager,
     candidates: Vec<IpAddr>,
 ) -> usize {
@@ -368,7 +373,12 @@ async fn execute_refill(
     let mut futures = FuturesUnordered::new();
 
     for ip in candidates {
-        futures.push(pre_connect_one(ip, port, ip_manager));
+        futures.push(pre_connect_one(
+            ip,
+            config.target_port,
+            config,
+            ip_manager,
+        ));
     }
 
     let mut filled = 0;
@@ -389,12 +399,11 @@ async fn add_conn_to_pool(
     maybe_conn: Option<PooledConnection>,
     filled: &mut usize,
 ) {
-    // 卫语句：连接建立失败
-    if maybe_conn.is_none() {
-        return;
-    }
+    let conn = match maybe_conn {
+        Some(c) => c,
+        None => return,
+    };
 
-    let conn = maybe_conn.unwrap();
     debug!("Pool refill: connected to {}", conn.ip);
     pool.push(conn).await;
     *filled += 1;
@@ -417,13 +426,15 @@ pub async fn run_refill_loop(
     ip_manager: IpManager,
     cancel_token: CancellationToken,
 ) {
-    let interval = Duration::from_millis(pool.config.refill_interval_ms);
     let min_idle = pool.config.min_idle;
 
     info!(
         "Connection pool started \
          (max={}, min_idle={}, idle={}s, interval={}ms)",
-        pool.config.pool_size, min_idle, pool.config.max_idle_secs, pool.config.refill_interval_ms,
+        pool.config.pool_size,
+        min_idle,
+        pool.config.max_idle_secs,
+        pool.config.refill_interval_ms,
     );
 
     // 启动时先填充到 min_idle
@@ -432,7 +443,13 @@ pub async fn run_refill_loop(
         debug!("Pool initial fill: {} connections", filled);
     }
 
+    let mut failures = 0;
+
     loop {
+        let interval = calculate_backoff_interval(
+            pool.config.refill_interval_ms,
+            failures,
+        );
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
@@ -441,39 +458,79 @@ pub async fn run_refill_loop(
             }
             // acquire 消费后立即补充 1 个
             _ = pool.refill_notify.notified() => {
-                let filled = refill_to_target(
-                    &pool, &config, &ip_manager,
-                    pool.current_size().await + 1,
-                ).await;
-                if filled > 0 {
-                    debug!(
-                        "Pool reactive refill: +{} (total: {})",
-                        filled,
-                        pool.current_size().await,
-                    );
+                if failures == 0 {
+                    let target = pool.current_size().await + 1;
+                    let filled = refill_to_target(
+                        &pool,
+                        &config,
+                        &ip_manager,
+                        target,
+                    )
+                    .await;
+                    if filled > 0 {
+                        debug!(
+                            "Pool reactive refill: +{} (total: {})",
+                            filled,
+                            pool.current_size().await
+                        );
+                        failures = 0;
+                    } else if target > pool.current_size().await {
+                        failures += 1;
+                    }
                 }
             }
             // 定时清理 + 维持 min_idle 水位
             _ = tokio::time::sleep(interval) => {
-                let purged = pool.purge_stale().await;
-                if purged > 0 {
-                    debug!(
-                        "Pool purged {} stale connections",
-                        purged,
-                    );
-                }
-                let filled = refill_to_target(
-                    &pool, &config, &ip_manager, min_idle,
-                ).await;
-                if filled > 0 {
-                    debug!(
-                        "Pool periodic refill: +{} (total: {})",
-                        filled,
-                        pool.current_size().await,
-                    );
-                }
+                handle_periodic_refill(
+                    &pool,
+                    &config,
+                    &ip_manager,
+                    min_idle,
+                    &mut failures,
+                )
+                .await;
             }
         }
+    }
+}
+
+/// 计算退避间隔
+fn calculate_backoff_interval(base_ms: u64, failures: u32) -> Duration {
+    if failures == 0 {
+        return Duration::from_millis(base_ms);
+    }
+    let backoff_ms = base_ms.saturating_mul(2_u64.pow(failures.min(5)));
+    Duration::from_millis(backoff_ms.min(30000))
+}
+
+/// 处理周期性清理和补充
+async fn handle_periodic_refill(
+    pool: &ConnectionPool,
+    config: &AppConfig,
+    ip_manager: &IpManager,
+    min_idle: usize,
+    failures: &mut u32,
+) {
+    let purged = pool.purge_stale().await;
+    if purged > 0 {
+        debug!("Pool purged {} stale connections", purged);
+    }
+
+    let current = pool.current_size().await;
+    if current < min_idle {
+        let filled = refill_to_target(pool, config, ip_manager, min_idle).await;
+        if filled > 0 {
+            debug!(
+                "Pool periodic refill: +{} (total: {})",
+                filled,
+                pool.current_size().await
+            );
+            *failures = 0;
+        } else {
+            *failures += 1;
+        }
+    } else {
+        *failures = 0;
     }
 }
 
@@ -482,7 +539,10 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
-    async fn create_test_conn(ip: &str, server_addr: SocketAddr) -> PooledConnection {
+    async fn create_test_conn(
+        ip: &str,
+        server_addr: SocketAddr,
+    ) -> PooledConnection {
         let stream = TcpStream::connect(server_addr).await.unwrap();
         PooledConnection {
             stream,

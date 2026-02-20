@@ -134,7 +134,8 @@ impl IpManager {
         let total = all_subnets.len();
         let k = calculate_top_k(total, top_k_percent);
 
-        let top_subnets: Vec<IpNet> = all_subnets.iter().take(k).map(|q| q.subnet).collect();
+        let top_subnets: Vec<IpNet> =
+            all_subnets.iter().take(k).map(|q| q.subnet).collect();
 
         debug!(
             "Recalculated best subnets: {} out of {} (top {:.1}%)",
@@ -169,7 +170,8 @@ impl IpManager {
             return Vec::new();
         }
 
-        let candidates = self.filter_subnets_by_colo(&best_subnets, target_colos);
+        let candidates =
+            self.filter_subnets_by_colo(&best_subnets, target_colos);
 
         if candidates.is_empty() {
             debug!("No candidates after colo filtering");
@@ -177,18 +179,24 @@ impl IpManager {
         }
 
         let mut rng = rand::thread_rng();
-        let selected_subnets = self.select_subnets(&candidates, n_subnets, &mut rng);
+        let selected_subnets =
+            self.select_subnets(&candidates, n_subnets, &mut rng);
 
         self.generate_ips_from_subnets(&selected_subnets, m_ips, &mut rng)
     }
 
     /// 按 Colo 过滤子网
-    fn filter_subnets_by_colo(&self, subnets: &[IpNet], target_colos: &[String]) -> Vec<IpNet> {
+    fn filter_subnets_by_colo(
+        &self,
+        subnets: &[IpNet],
+        target_colos: &[String],
+    ) -> Vec<IpNet> {
         if target_colos.is_empty() {
             return subnets.to_vec();
         }
 
-        let target_colo_set: std::collections::HashSet<_> = target_colos.iter().collect();
+        let target_colo_set: std::collections::HashSet<_> =
+            target_colos.iter().collect();
 
         subnets
             .iter()
@@ -203,7 +211,12 @@ impl IpManager {
     }
 
     /// 随机选择子网
-    fn select_subnets(&self, candidates: &[IpNet], n: usize, rng: &mut impl Rng) -> Vec<IpNet> {
+    fn select_subnets(
+        &self,
+        candidates: &[IpNet],
+        n: usize,
+        rng: &mut impl Rng,
+    ) -> Vec<IpNet> {
         if candidates.len() <= n {
             return candidates.to_vec();
         }
@@ -251,7 +264,8 @@ impl IpManager {
         }
         if max < current {
             let diff = current - max;
-            if let Ok(permit) = self.fd_semaphore.try_acquire_many(diff as u32) {
+            if let Ok(permit) = self.fd_semaphore.try_acquire_many(diff as u32)
+            {
                 permit.forget();
                 debug!("Decreased FD semaphore permits to {}", max);
                 return;

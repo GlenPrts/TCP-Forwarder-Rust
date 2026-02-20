@@ -6,7 +6,10 @@ use std::net::IpAddr;
 ///
 /// 对于 IPv4，会避开网络地址和广播地址（如果子网足够大）
 /// 对于 IPv6，会避开网络地址（对于 /128 或 /127 子网除外）
-pub fn generate_random_ip_in_subnet(subnet: &IpNet, rng: &mut impl Rng) -> IpAddr {
+pub fn generate_random_ip_in_subnet(
+    subnet: &IpNet,
+    rng: &mut impl Rng,
+) -> IpAddr {
     match subnet {
         IpNet::V4(net) => generate_v4_ip(net, rng),
         IpNet::V6(net) => generate_v6_ip(net, rng),

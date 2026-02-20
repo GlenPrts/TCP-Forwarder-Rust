@@ -60,6 +60,34 @@ pub enum ConfigError {
     InvalidStaggeredDelay(u64),
 }
 
+/// TCP Keepalive 配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcpKeepaliveConfig {
+    /// Keepalive 空闲时间（秒）
+    #[serde(default = "default_keepalive_time")]
+    pub time_secs: u64,
+
+    /// Keepalive 探测间隔（秒）
+    #[serde(default = "default_keepalive_interval")]
+    pub interval_secs: u64,
+}
+
+fn default_keepalive_time() -> u64 {
+    60
+}
+fn default_keepalive_interval() -> u64 {
+    10
+}
+
+impl Default for TcpKeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            time_secs: default_keepalive_time(),
+            interval_secs: default_keepalive_interval(),
+        }
+    }
+}
+
 /// 后台定时扫描配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackgroundScanConfig {
@@ -254,7 +282,9 @@ impl ScanStrategyConfig {
             if self.initial_scan_mask < 8 || self.initial_scan_mask > 32 {
                 return Err(ConfigError::InvalidInitialScanMask.into());
             }
-            if self.promising_subnet_percent <= 0.0 || self.promising_subnet_percent >= 1.0 {
+            if self.promising_subnet_percent <= 0.0
+                || self.promising_subnet_percent >= 1.0
+            {
                 return Err(ConfigError::InvalidPromisingSubnetPercent(
                     self.promising_subnet_percent,
                 )
@@ -334,6 +364,10 @@ pub struct AppConfig {
     /// 子网质量数据过期时间（秒）
     #[serde(default = "default_subnet_ttl_secs")]
     pub subnet_ttl_secs: u64,
+
+    /// TCP Keepalive 配置
+    #[serde(default)]
+    pub tcp_keepalive: TcpKeepaliveConfig,
 }
 
 fn default_top_k_percent() -> f64 {
@@ -375,7 +409,8 @@ impl Default for AppConfig {
             ],
             bind_addr: "0.0.0.0:8080".parse().unwrap(),
             web_addr: "0.0.0.0:3000".parse().unwrap(),
-            trace_url: "http://engage.cloudflareclient.com/cdn-cgi/trace".to_string(),
+            trace_url: "http://engage.cloudflareclient.com/cdn-cgi/trace"
+                .to_string(),
             asn_url: "https://asn.0x01111110.com/13335?4".to_string(),
             ip_store_file: "subnet_results.json".to_string(),
             selection_top_k_percent: default_top_k_percent(),
@@ -388,6 +423,7 @@ impl Default for AppConfig {
             max_open_files: default_max_open_files(),
             max_subnets: default_max_subnets(),
             subnet_ttl_secs: default_subnet_ttl_secs(),
+            tcp_keepalive: TcpKeepaliveConfig::default(),
         }
     }
 }
@@ -396,24 +432,40 @@ impl AppConfig {
     /// 从文件加载配置（支持 JSONC 格式，允许注释）
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open config file: {}", path.display()))?;
+        let file = File::open(path).with_context(|| {
+            format!("Failed to open config file: {}", path.display())
+        })?;
         let reader = BufReader::new(file);
         let stripped = StripComments::new(reader);
-        let config: Self = serde_json::from_reader(stripped)
-            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+        let config: Self =
+            serde_json::from_reader(stripped).with_context(|| {
+                format!("Failed to parse config file: {}", path.display())
+            })?;
         config.validate()?;
         Ok(config)
     }
 
     /// 验证配置参数
     pub fn validate(&self) -> Result<()> {
+        self.validate_basic_params()?;
+        self.validate_urls()?;
+        self.validate_subconfigs()?;
+        self.validate_limits()?;
+        Ok(())
+    }
+
+    fn validate_basic_params(&self) -> Result<()> {
         if self.target_port == 0 {
             return Err(ConfigError::InvalidTargetPort.into());
         }
 
-        if self.selection_top_k_percent <= 0.0 || self.selection_top_k_percent > 1.0 {
-            return Err(ConfigError::InvalidTopKPercent(self.selection_top_k_percent).into());
+        if self.selection_top_k_percent <= 0.0
+            || self.selection_top_k_percent > 1.0
+        {
+            return Err(ConfigError::InvalidTopKPercent(
+                self.selection_top_k_percent,
+            )
+            .into());
         }
 
         if self.selection_random_n_subnets == 0 {
@@ -425,22 +477,24 @@ impl AppConfig {
         }
 
         if self.staggered_delay_ms < 10 || self.staggered_delay_ms > 2000 {
-            return Err(ConfigError::InvalidStaggeredDelay(self.staggered_delay_ms).into());
+            return Err(ConfigError::InvalidStaggeredDelay(
+                self.staggered_delay_ms,
+            )
+            .into());
         }
 
         if self.cidr_list.is_empty() {
             return Err(ConfigError::EmptyCidrList.into());
         }
 
-        if self.cidr_list.is_empty() {
-            return Err(ConfigError::EmptyCidrList.into());
-        }
+        Ok(())
+    }
 
+    fn validate_urls(&self) -> Result<()> {
         if self.trace_url.is_empty() {
             return Err(ConfigError::EmptyTraceUrl.into());
         }
 
-        // 验证 URL 格式
         if let Err(e) = reqwest::Url::parse(&self.trace_url) {
             return Err(anyhow::anyhow!("Invalid trace_url: {}", e));
         }
@@ -449,17 +503,23 @@ impl AppConfig {
             return Err(ConfigError::EmptyIpStoreFile.into());
         }
 
-        // 验证 ASN URL（如果提供）
         if !self.asn_url.is_empty() {
             if let Err(e) = reqwest::Url::parse(&self.asn_url) {
                 return Err(anyhow::anyhow!("Invalid asn_url: {}", e));
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_subconfigs(&self) -> Result<()> {
         self.scan_strategy.validate()?;
         self.background_scan.validate()?;
         self.connection_pool.validate()?;
+        Ok(())
+    }
 
+    fn validate_limits(&self) -> Result<()> {
         if self.max_subnets == 0 {
             return Err(anyhow::anyhow!("max_subnets must be > 0"));
         }

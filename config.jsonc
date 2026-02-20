@@ -59,7 +59,7 @@
   // --- 预连接池 ---
   // CF 空闲 TCP 约 15s 后关闭，据此调参
   "connection_pool": {
-    "enabled": false,
+    "enabled": true,
     // 池容量上限
     "pool_size": 16,
     // 后台定时维持的最小空闲连接数
@@ -74,5 +74,11 @@
   // 子网质量数据过期时间（秒）
   "subnet_ttl_secs": 604800,
   // 最大打开文件数（FD 限制）
-  "max_open_files": 1024
+  "max_open_files": 1024,
+
+  // --- TCP Keepalive 配置 ---
+  "tcp_keepalive": {
+    "time_secs": 60,
+    "interval_secs": 10
+  }
 }

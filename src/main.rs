@@ -126,9 +126,15 @@ async fn run_scan_mode(config: Arc<AppConfig>, ip_manager: IpManager) {
     info!("Running in scan mode...");
     run_scan_once(config.clone(), ip_manager.clone(), 200).await;
 
-    match ip_manager.save_to_file(&config.ip_store_file) {
-        Ok(_) => info!("Scan results saved to {}", config.ip_store_file),
-        Err(e) => error!("Failed to save scan results: {}", e),
+    let path = config.ip_store_file.clone();
+    let manager = ip_manager.clone();
+    let save_result =
+        tokio::task::spawn_blocking(move || manager.save_to_file(&path)).await;
+
+    match save_result {
+        Ok(Ok(_)) => info!("Scan results saved to {}", config.ip_store_file),
+        Ok(Err(e)) => error!("Failed to save scan results: {}", e),
+        Err(e) => error!("Failed to join save task: {}", e),
     }
 }
 
@@ -139,7 +145,9 @@ async fn run_scan_mode(config: Arc<AppConfig>, ip_manager: IpManager) {
 ///
 /// # 返回值
 /// 连接池实例（如果启用）
-fn create_connection_pool(config: &Arc<AppConfig>) -> Option<Arc<ConnectionPool>> {
+fn create_connection_pool(
+    config: &Arc<AppConfig>,
+) -> Option<Arc<ConnectionPool>> {
     if !config.connection_pool.enabled {
         return None;
     }
@@ -218,12 +226,17 @@ async fn graceful_shutdown(
 /// - `config`: 应用配置
 /// - `ip_manager`: IP 管理器
 /// - `scan_on_start`: 是否启动时立即扫描
-async fn run_forward_mode(config: Arc<AppConfig>, ip_manager: IpManager, scan_on_start: bool) {
+async fn run_forward_mode(
+    config: Arc<AppConfig>,
+    ip_manager: IpManager,
+    scan_on_start: bool,
+) {
     let cancel_token = CancellationToken::new();
 
     let pool = create_connection_pool(&config);
 
-    let pool_handle = spawn_pool_refill(&pool, &config, &ip_manager, &cancel_token);
+    let pool_handle =
+        spawn_pool_refill(&pool, &config, &ip_manager, &cancel_token);
 
     let server_handle = tokio::spawn(start_server(
         config.clone(),
@@ -239,14 +252,20 @@ async fn run_forward_mode(config: Arc<AppConfig>, ip_manager: IpManager, scan_on
         cancel_token.clone(),
     ));
 
-    let scan_handle = spawn_background_scan(&config, &ip_manager, &cancel_token, scan_on_start);
+    let scan_handle = spawn_background_scan(
+        &config,
+        &ip_manager,
+        &cancel_token,
+        scan_on_start,
+    );
 
     let _ = tokio::signal::ctrl_c().await;
     info!("Received Ctrl+C, initiating graceful shutdown...");
 
     cancel_token.cancel();
 
-    graceful_shutdown(server_handle, web_handle, scan_handle, pool_handle).await;
+    graceful_shutdown(server_handle, web_handle, scan_handle, pool_handle)
+        .await;
 }
 
 /// 启动后台扫描任务（如果配置启用）
@@ -308,8 +327,10 @@ async fn main() {
     let manager = ip_manager.clone();
     let path = config.ip_store_file.clone();
     let top_k = config.selection_top_k_percent;
-    let load_result =
-        tokio::task::spawn_blocking(move || manager.load_from_file(&path, top_k)).await;
+    let load_result = tokio::task::spawn_blocking(move || {
+        manager.load_from_file(&path, top_k)
+    })
+    .await;
 
     match load_result {
         Ok(Ok(_)) => info!("Loaded IPs from {}", config.ip_store_file),

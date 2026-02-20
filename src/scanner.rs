@@ -115,10 +115,11 @@ async fn run_full_scan(
 ) -> ScanStats {
     let mask = FOCUSED_SCAN_SUBNET_MASK;
     let root_cidrs_vec = root_cidrs.to_vec();
-    let target_subnets =
-        tokio::task::spawn_blocking(move || split_cidrs_to_subnets(root_cidrs_vec, mask))
-            .await
-            .unwrap_or_default();
+    let target_subnets = tokio::task::spawn_blocking(move || {
+        split_cidrs_to_subnets(root_cidrs_vec, mask)
+    })
+    .await
+    .unwrap_or_default();
     info!("Total target subnets to scan: {}", target_subnets.len());
 
     let samples = config.scan_strategy.focused_samples_per_subnet;
@@ -178,14 +179,20 @@ async fn run_adaptive_scan(
     // 保证最低并发数为 50
     let effective_concurrency = concurrency.max(50);
 
-    let (initial_success, initial_total, initial_results) =
-        run_initial_scan(&config, &ip_manager, effective_concurrency, root_cidrs).await;
+    let (initial_success, initial_total, initial_results) = run_initial_scan(
+        &config,
+        &ip_manager,
+        effective_concurrency,
+        root_cidrs,
+    )
+    .await;
 
     let promising_percent = config.scan_strategy.promising_subnet_percent;
-    let hot_spots =
-        tokio::task::spawn_blocking(move || analyze_hot_spots(initial_results, promising_percent))
-            .await
-            .unwrap_or_default();
+    let hot_spots = tokio::task::spawn_blocking(move || {
+        analyze_hot_spots(initial_results, promising_percent)
+    })
+    .await
+    .unwrap_or_default();
 
     if hot_spots.is_empty() {
         warn!("No promising subnets found in phase 1. Aborting scan.");
@@ -196,8 +203,13 @@ async fn run_adaptive_scan(
         };
     }
 
-    let (focused_success, focused_total, focused_results) =
-        run_focused_scan(&config, &ip_manager, effective_concurrency, &hot_spots).await;
+    let (focused_success, focused_total, focused_results) = run_focused_scan(
+        &config,
+        &ip_manager,
+        effective_concurrency,
+        &hot_spots,
+    )
+    .await;
 
     let top_k = config.selection_top_k_percent;
     let manager = ip_manager.clone();
@@ -235,9 +247,11 @@ async fn run_initial_scan(
     info!("[Phase 1/3] Starting wide and sparse scan...");
     let mask = strategy.initial_scan_mask;
     let root_cidrs_vec = root_cidrs.to_vec();
-    let subnets = tokio::task::spawn_blocking(move || split_cidrs_to_subnets(root_cidrs_vec, mask))
-        .await
-        .unwrap_or_default();
+    let subnets = tokio::task::spawn_blocking(move || {
+        split_cidrs_to_subnets(root_cidrs_vec, mask)
+    })
+    .await
+    .unwrap_or_default();
     info!(
         "[Phase 1/3] Split into {} /{} subnets.",
         subnets.len(),
@@ -397,8 +411,11 @@ fn aggregate_and_persist(
     drop(guard); // 提前释放锁
 
     let now = Utc::now();
-    let (removed_expired, removed_evicted) =
-        ip_manager.cleanup_subnets(now, config.subnet_ttl_secs, config.max_subnets);
+    let (removed_expired, removed_evicted) = ip_manager.cleanup_subnets(
+        now,
+        config.subnet_ttl_secs,
+        config.max_subnets,
+    );
     if removed_expired > 0 || removed_evicted > 0 {
         info!(
             "Cleaned subnets: expired={}, evicted={}, remaining={}",
@@ -543,7 +560,10 @@ where
     }
 
     flush_batch(&mut batch, &results);
-    pb.finish_with_message(format!("Scan complete. Found {} valid IPs.", success_count));
+    pb.finish_with_message(format!(
+        "Scan complete. Found {} valid IPs.",
+        success_count
+    ));
     (success_count, total_scanned)
 }
 
@@ -613,7 +633,8 @@ async fn fetch_asn_cidrs(url: &str) -> Result<Vec<IpNet>> {
         }
     }
 
-    let err = last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
+    let err = last_error
+        .unwrap_or_else(|| anyhow::anyhow!("Unknown error fetching ASN CIDRs"));
     Err(err)
 }
 
@@ -702,13 +723,18 @@ async fn execute_single_probe(
 ///
 /// # 返回值
 /// (延迟列表, 成功次数, 最后 Colo)
-async fn run_probes(client: &Client, trace_url: &str) -> (Vec<u128>, usize, String) {
+async fn run_probes(
+    client: &Client,
+    trace_url: &str,
+) -> (Vec<u128>, usize, String) {
     let mut latencies = Vec::with_capacity(PROBE_COUNT);
     let mut success_count = 0;
     let mut last_colo = String::new();
 
     for probe_idx in 0..PROBE_COUNT {
-        if let Some((latency, colo)) = execute_single_probe(client, trace_url, probe_idx).await {
+        if let Some((latency, colo)) =
+            execute_single_probe(client, trace_url, probe_idx).await
+        {
             latencies.push(latency);
             success_count += 1;
             last_colo = colo;
@@ -731,9 +757,15 @@ async fn run_probes(client: &Client, trace_url: &str) -> (Vec<u128>, usize, Stri
 ///
 /// # 返回值
 /// IP 质量信息或 None
-async fn test_ip(ip: IpAddr, trace_url: &str, host: &str, port: u16) -> Option<IpQuality> {
+async fn test_ip(
+    ip: IpAddr,
+    trace_url: &str,
+    host: &str,
+    port: u16,
+) -> Option<IpQuality> {
     let client = build_probe_client(ip, host, port)?;
-    let (latencies, success_count, last_colo) = run_probes(&client, trace_url).await;
+    let (latencies, success_count, last_colo) =
+        run_probes(&client, trace_url).await;
 
     if success_count == 0 {
         return None;
@@ -817,15 +849,20 @@ fn parse_colo(body: &str) -> Option<String> {
 ///
 /// # 返回值
 /// 扫描统计信息
-async fn run_and_persist(config: &Arc<AppConfig>, ip_manager: &IpManager) -> ScanStats {
+async fn run_and_persist(
+    config: &Arc<AppConfig>,
+    ip_manager: &IpManager,
+) -> ScanStats {
     let concurrency = config.background_scan.concurrency;
-    let stats = run_scan_once(config.clone(), ip_manager.clone(), concurrency).await;
+    let stats =
+        run_scan_once(config.clone(), ip_manager.clone(), concurrency).await;
 
     // 使用 spawn_blocking 避免阻塞 async 线程
     let manager = ip_manager.clone();
     let path = config.ip_store_file.clone();
 
-    let save_result = tokio::task::spawn_blocking(move || manager.save_to_file(&path)).await;
+    let save_result =
+        tokio::task::spawn_blocking(move || manager.save_to_file(&path)).await;
 
     match save_result {
         Ok(Ok(_)) => info!("Background scan saved to {}", config.ip_store_file),
@@ -854,7 +891,9 @@ pub async fn run_background_scan(
     info!(
         "Background scan enabled \
          (interval={}s, concurrency={}, scan_on_start={})",
-        config.background_scan.interval_secs, config.background_scan.concurrency, scan_on_start,
+        config.background_scan.interval_secs,
+        config.background_scan.concurrency,
+        scan_on_start,
     );
 
     if scan_on_start {
@@ -921,10 +960,11 @@ mod tests {
         let cidrs = vec![
             "104.16.0.0/24".parse::<IpNet>().unwrap(),
             "104.16.1.0/24".parse::<IpNet>().unwrap(),
-            "104.16.0.0/23".parse::<IpNet>().unwrap(), // Overlaps with the two above
+            "104.16.0.0/23".parse::<IpNet>().unwrap(), // Overlaps
         ];
         let subnets = split_cidrs_to_subnets(cidrs, 24);
-        // Aggregation should merge them into 104.16.0.0/23, then split into two /24s
+        // Aggregation should merge them into 104.16.0.0/23,
+        // then split into two /24s
         assert_eq!(subnets.len(), 2);
         assert!(subnets.contains(&"104.16.0.0/24".parse::<IpNet>().unwrap()));
         assert!(subnets.contains(&"104.16.1.0/24".parse::<IpNet>().unwrap()));

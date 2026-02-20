@@ -132,7 +132,13 @@ pub struct IpQuality {
 
 impl IpQuality {
     /// 创建新的 IP 质量数据
-    pub fn new(ip: IpAddr, latency: u128, jitter: u128, loss_rate: f32, colo: String) -> Self {
+    pub fn new(
+        ip: IpAddr,
+        latency: u128,
+        jitter: u128,
+        loss_rate: f32,
+        colo: String,
+    ) -> Self {
         let mut quality = Self {
             ip,
             latency: latency as u64,
@@ -156,17 +162,26 @@ impl IpQuality {
     pub fn calculate_score(&mut self) {
         use scoring::*;
 
-        let latency_penalty = (self.latency as f32) / 10.0 * LATENCY_PENALTY_PER_10MS;
-        let jitter_penalty = (self.jitter as f32) / 5.0 * JITTER_PENALTY_PER_5MS;
+        let latency_penalty =
+            (self.latency as f32) / 10.0 * LATENCY_PENALTY_PER_10MS;
+        let jitter_penalty =
+            (self.jitter as f32) / 5.0 * JITTER_PENALTY_PER_5MS;
         // 调整丢包惩罚：每 1% 丢包扣 50 分
         let loss_penalty = self.loss_rate * 100.0 * LOSS_PENALTY_PER_PERCENT;
 
-        let score = (BASE_SCORE - latency_penalty - jitter_penalty - loss_penalty).max(0.0);
+        let score =
+            (BASE_SCORE - latency_penalty - jitter_penalty - loss_penalty)
+                .max(0.0);
 
         debug!(
             "IP {} score: base={}, latency_p={:.2}, jitter_p={:.2}, \
              loss_p={:.2}, final={:.2}",
-            self.ip, BASE_SCORE, latency_penalty, jitter_penalty, loss_penalty, score
+            self.ip,
+            BASE_SCORE,
+            latency_penalty,
+            jitter_penalty,
+            loss_penalty,
+            score
         );
 
         self.score = score;
@@ -180,23 +195,53 @@ mod tests {
     #[test]
     fn test_ip_quality_score_calculation() {
         // 完美的 IP：0 延迟，0 抖动，0 丢包
-        let quality = IpQuality::new("1.2.3.4".parse().unwrap(), 0, 0, 0.0, "LAX".to_string());
+        let quality = IpQuality::new(
+            "1.2.3.4".parse().unwrap(),
+            0,
+            0,
+            0.0,
+            "LAX".to_string(),
+        );
         assert_eq!(quality.score, 100.0);
 
         // 100ms 延迟
-        let quality = IpQuality::new("1.2.3.4".parse().unwrap(), 100, 0, 0.0, "LAX".to_string());
+        let quality = IpQuality::new(
+            "1.2.3.4".parse().unwrap(),
+            100,
+            0,
+            0.0,
+            "LAX".to_string(),
+        );
         assert_eq!(quality.score, 90.0); // 100 - 10
 
         // 1% 丢包（每 1% 扣 50 分）
-        let quality = IpQuality::new("1.2.3.4".parse().unwrap(), 0, 0, 0.01, "LAX".to_string());
+        let quality = IpQuality::new(
+            "1.2.3.4".parse().unwrap(),
+            0,
+            0,
+            0.01,
+            "LAX".to_string(),
+        );
         assert_eq!(quality.score, 50.0); // 100 - 50 = 50
     }
 
     #[test]
     fn test_subnet_quality_from_samples() {
         let samples = vec![
-            IpQuality::new("1.2.3.1".parse().unwrap(), 100, 10, 0.0, "LAX".to_string()),
-            IpQuality::new("1.2.3.2".parse().unwrap(), 120, 15, 0.0, "LAX".to_string()),
+            IpQuality::new(
+                "1.2.3.1".parse().unwrap(),
+                100,
+                10,
+                0.0,
+                "LAX".to_string(),
+            ),
+            IpQuality::new(
+                "1.2.3.2".parse().unwrap(),
+                120,
+                15,
+                0.0,
+                "LAX".to_string(),
+            ),
         ];
 
         let subnet: IpNet = "1.2.3.0/24".parse().unwrap();
@@ -210,9 +255,27 @@ mod tests {
     #[test]
     fn test_determine_primary_colo() {
         let samples = vec![
-            IpQuality::new("1.2.3.1".parse().unwrap(), 100, 10, 0.0, "LAX".to_string()),
-            IpQuality::new("1.2.3.2".parse().unwrap(), 100, 10, 0.0, "SJC".to_string()),
-            IpQuality::new("1.2.3.3".parse().unwrap(), 100, 10, 0.0, "LAX".to_string()),
+            IpQuality::new(
+                "1.2.3.1".parse().unwrap(),
+                100,
+                10,
+                0.0,
+                "LAX".to_string(),
+            ),
+            IpQuality::new(
+                "1.2.3.2".parse().unwrap(),
+                100,
+                10,
+                0.0,
+                "SJC".to_string(),
+            ),
+            IpQuality::new(
+                "1.2.3.3".parse().unwrap(),
+                100,
+                10,
+                0.0,
+                "LAX".to_string(),
+            ),
         ];
 
         let colo = determine_primary_colo(&samples);
