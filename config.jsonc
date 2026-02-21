@@ -27,7 +27,7 @@
   // 仅使用评分最高的前 30% IP 段
   "selection_top_k_percent": 0.3,
   // 每次连接随机选取 3 个子网
-  "selection_random_n_subnets": 3,
+  "selection_random_n_subnets": 4,
   // 每个子网内随机生成 2 个 IP 参与竞速
   "selection_random_m_ips": 2,
   // Happy Eyeballs 竞速连接的交错延迟（毫秒）
@@ -59,7 +59,7 @@
   // --- 预连接池 ---
   // CF 空闲 TCP 约 15s 后关闭，据此调参
   "connection_pool": {
-    "enabled": true,
+    "enabled": false,
     // 池容量上限
     "pool_size": 16,
     // 后台定时维持的最小空闲连接数
@@ -80,5 +80,15 @@
   "tcp_keepalive": {
     "time_secs": 60,
     "interval_secs": 10
+  },
+
+  // --- 评分权重配置 ---
+  // 基础分 100，延迟每 10ms 扣 1 分，
+  // 抖动每 5ms 扣 1 分，丢包每 1% 扣 50 分
+  "scoring": {
+    "base_score": 100.0,
+    "latency_penalty_per_10ms": 1.0,
+    "jitter_penalty_per_5ms": 1.0,
+    "loss_penalty_per_percent": 50.0
   }
 }

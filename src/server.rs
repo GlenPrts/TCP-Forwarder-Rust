@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::metrics::ForwardMetrics;
 use crate::pool::ConnectionPool;
 use crate::state::IpManager;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -32,6 +33,7 @@ pub async fn start_server(
     ip_manager: IpManager,
     pool: Option<Arc<ConnectionPool>>,
     cancel_token: CancellationToken,
+    metrics: Arc<ForwardMetrics>,
 ) {
     let listener = match TcpListener::bind(config.bind_addr).await {
         Ok(l) => l,
@@ -55,8 +57,9 @@ pub async fn start_server(
                     &config,
                     &ip_manager,
                     &pool,
-                    &cancel_token
-                ).await;
+                    &cancel_token,
+                    &metrics,
+                );
             }
         }
     }
@@ -65,12 +68,16 @@ pub async fn start_server(
 }
 
 /// 处理监听器接收到的连接结果
-async fn handle_accept_result(
+///
+/// 立即 spawn 异步任务，不阻塞 accept 循环。
+/// FD permit 获取在 spawn 内部完成。
+fn handle_accept_result(
     accept_result: std::io::Result<(TcpStream, SocketAddr)>,
     config: &Arc<AppConfig>,
     ip_manager: &IpManager,
     pool: &Option<Arc<ConnectionPool>>,
     cancel_token: &CancellationToken,
+    metrics: &Arc<ForwardMetrics>,
 ) {
     let (client_stream, client_addr) = match accept_result {
         Ok(res) => res,
@@ -80,51 +87,48 @@ async fn handle_accept_result(
         }
     };
 
-    process_new_connection(
-        client_stream,
-        client_addr,
-        config.clone(),
-        ip_manager.clone(),
-        pool.clone(),
-        cancel_token.clone(),
-    )
-    .await;
-}
+    debug!("Accepted connection from {}", client_addr);
 
-/// 处理新连接请求
-///
-/// # 参数
-/// - `stream`: 客户端连接流
-/// - `addr`: 客户端地址
-/// - `config`: 配置
-/// - `ip_manager`: IP 管理器
-/// - `cancel_token`: 取消令牌
-async fn process_new_connection(
-    stream: TcpStream,
-    addr: SocketAddr,
-    config: Arc<AppConfig>,
-    ip_manager: IpManager,
-    pool: Option<Arc<ConnectionPool>>,
-    cancel_token: CancellationToken,
-) {
-    debug!("Accepted connection from {}", addr);
+    let config = config.clone();
+    let ip_manager = ip_manager.clone();
+    let pool = pool.clone();
+    let cancel_token = cancel_token.clone();
+    let metrics = metrics.clone();
 
-    // 获取并发许可，支持取消
-    let permit = tokio::select! {
-        _ = cancel_token.cancelled() => return,
-        p = ip_manager.acquire_fd_permit() => match p {
-            Ok(p) => p,
-            Err(_) => return,
-        }
-    };
+    metrics.inc_total_connections();
+    metrics.inc_active();
 
     tokio::spawn(async move {
-        // 保持许可直到任务结束
+        // 在 spawn 内部获取许可，避免阻塞 accept 循环
+        let permit = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                metrics.dec_active();
+                return;
+            }
+            p = ip_manager.acquire_fd_permit() => match p {
+                Ok(p) => p,
+                Err(_) => {
+                    metrics.dec_active();
+                    return;
+                }
+            }
+        };
         let _permit = permit;
-        let result =
-            handle_connection(stream, addr, config, ip_manager, pool).await;
+        let result = handle_connection(
+            client_stream,
+            client_addr,
+            config,
+            ip_manager,
+            pool,
+            &metrics,
+        )
+        .await;
+        metrics.dec_active();
         if let Err(e) = result {
-            debug!("Connection handling error for {}: {}", addr, e);
+            debug!(
+                "Connection handling error for {}: {}",
+                client_addr, e
+            );
         }
     });
 }
@@ -152,14 +156,15 @@ async fn handle_connection(
     config: Arc<AppConfig>,
     ip_manager: IpManager,
     pool: Option<Arc<ConnectionPool>>,
+    metrics: &ForwardMetrics,
 ) -> anyhow::Result<()> {
-    // P0 Bug fix: 配置 Keepalive 和 NODELAY
     let _ = client_stream.set_nodelay(true);
     let _ = configure_keepalive(&client_stream, &config);
 
-    let mut remote_stream =
-        connect_to_remote(&config, &ip_manager, &pool, client_addr).await?;
-
+    let mut remote_stream = connect_to_remote(
+        &config, &ip_manager, &pool, client_addr, metrics,
+    )
+    .await?;
     // 连接关闭后 peer_addr() 可能失败，提前保存
     let peer = remote_stream
         .peer_addr()
@@ -183,6 +188,8 @@ async fn handle_connection(
         }
     };
 
+    metrics.add_bytes(bytes_tx, bytes_rx);
+
     info!(
         "Connection closed: {} -> {} (TX: {} bytes, RX: {} bytes)",
         client_addr, peer, bytes_tx, bytes_rx
@@ -205,16 +212,23 @@ async fn connect_to_remote(
     ip_manager: &IpManager,
     pool: &Option<Arc<ConnectionPool>>,
     client_addr: SocketAddr,
+    metrics: &ForwardMetrics,
 ) -> anyhow::Result<TcpStream> {
-    // 优先从预连接池获取
     if let Some(ref p) = pool {
-        if let Some((stream, ip)) = p.acquire().await {
-            info!("Using pooled connection to {} for {}", ip, client_addr);
+        if let Some((stream, ip)) = p.acquire() {
+            info!(
+                "Using pooled connection to {} for {}",
+                ip, client_addr
+            );
+            metrics.inc_pool_hit();
             return Ok(stream);
         }
     }
 
-    let stream = connect_via_race(config, ip_manager, client_addr).await?;
+    let stream = connect_via_race(
+        config, ip_manager, client_addr, metrics,
+    )
+    .await?;
 
     // 延迟配置：仅对竞速胜出者（非池化连接）进行配置
     let _ = stream.set_nodelay(true);
@@ -236,6 +250,7 @@ async fn connect_via_race(
     config: &Arc<AppConfig>,
     ip_manager: &IpManager,
     client_addr: SocketAddr,
+    metrics: &ForwardMetrics,
 ) -> anyhow::Result<TcpStream> {
     let candidate_ips = ip_manager.get_target_ips(
         &config.target_colos,
@@ -265,10 +280,15 @@ async fn connect_via_race(
             "Fastest connection: {} for {} ({:?})",
             result.ip, client_addr, result.connect_time
         );
+        metrics.inc_race_success();
         return Ok(result.stream);
     }
 
-    warn!("All connections failed for {}, falling back", client_addr);
+    metrics.inc_race_failure();
+    warn!(
+        "All connections failed for {}, falling back",
+        client_addr
+    );
     perform_fallback(config, ip_manager).await
 }
 
@@ -284,10 +304,7 @@ fn handle_no_ips(config: &AppConfig) -> anyhow::Error {
 }
 
 /// 执行回退连接
-async fn perform_fallback(
-    config: &AppConfig,
-    ip_manager: &IpManager,
-) -> anyhow::Result<TcpStream> {
+async fn perform_fallback(config: &AppConfig, ip_manager: &IpManager) -> anyhow::Result<TcpStream> {
     let fallback_ips = ip_manager.get_target_ips(&config.target_colos, 1, 1);
 
     if fallback_ips.is_empty() {
@@ -466,10 +483,7 @@ async fn connect_with_fallback(
 ///
 /// # 返回值
 /// - `std::io::Result<()>`: 配置结果
-fn configure_keepalive(
-    stream: &TcpStream,
-    config: &AppConfig,
-) -> std::io::Result<()> {
+fn configure_keepalive(stream: &TcpStream, config: &AppConfig) -> std::io::Result<()> {
     let socket_ref = SockRef::from(stream);
     let keepalive = TcpKeepalive::new()
         .with_time(Duration::from_secs(config.tcp_keepalive.time_secs))

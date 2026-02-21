@@ -1,9 +1,13 @@
 use crate::config::AppConfig;
+use crate::metrics::ForwardMetrics;
 use crate::model::SubnetQuality;
 use crate::pool::ConnectionPool;
 use crate::state::IpManager;
 use axum::{
-    extract::State, http::StatusCode, response::IntoResponse, routing::get,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
     Json, Router,
 };
 use serde::Serialize;
@@ -16,6 +20,7 @@ struct AppState {
     config: Arc<AppConfig>,
     ip_manager: IpManager,
     pool: Option<Arc<ConnectionPool>>,
+    metrics: Arc<ForwardMetrics>,
 }
 
 #[derive(Serialize)]
@@ -51,11 +56,13 @@ pub async fn start_web_server(
     ip_manager: IpManager,
     pool: Option<Arc<ConnectionPool>>,
     cancel_token: CancellationToken,
+    metrics: Arc<ForwardMetrics>,
 ) {
     let state = AppState {
         config: config.clone(),
         ip_manager,
         pool,
+        metrics,
     };
 
     let app = Router::new()
@@ -63,6 +70,7 @@ pub async fn start_web_server(
         .route("/status", get(get_status))
         .route("/api/v1/subnets", get(get_subnets_api))
         .route("/api/v1/pool", get(get_pool_stats))
+        .route("/api/v1/stats", get(get_forward_stats))
         .route("/debug", get(get_debug))
         .with_state(state);
 
@@ -104,9 +112,7 @@ async fn get_status(State(state): State<AppState>) -> Json<Vec<SubnetQuality>> {
     Json(subnets)
 }
 
-async fn get_subnets_api(
-    State(state): State<AppState>,
-) -> Json<StatusResponse> {
+async fn get_subnets_api(State(state): State<AppState>) -> Json<StatusResponse> {
     let mut subnets: Vec<SubnetQuality> = state.ip_manager.get_all_subnets();
     subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
 
@@ -137,6 +143,13 @@ async fn get_pool_stats(State(state): State<AppState>) -> impl IntoResponse {
         None => return (StatusCode::NOT_FOUND, Json(None)),
     };
 
-    let snapshot = pool.snapshot().await;
+    let snapshot = pool.snapshot();
     (StatusCode::OK, Json(Some(snapshot)))
+}
+
+async fn get_forward_stats(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let snapshot = state.metrics.snapshot();
+    (StatusCode::OK, Json(snapshot))
 }

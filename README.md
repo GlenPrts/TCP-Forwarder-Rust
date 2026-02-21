@@ -44,6 +44,8 @@
   "selection_top_k_percent": 0.3,
   "selection_random_n_subnets": 3,
   "selection_random_m_ips": 2,
+  // Happy Eyeballs 竞速连接的交错延迟（毫秒）
+  "staggered_delay_ms": 200,
   "scan_strategy": {
     "type": "adaptive",
     "initial_scan_mask": 20,
@@ -59,18 +61,21 @@
   // 预连接池：后台预建立 TCP 连接，消除握手延迟
   "connection_pool": {
     "enabled": true,
-    // 池容量上限
     "pool_size": 16,
-    // 后台定时维持的最小空闲连接数
     "min_idle": 3,
-    // 连接最大空闲时间（秒），需低于 CF 的 ~15s
     "max_idle_secs": 12,
-    // 定时清理 + 水位检查间隔（毫秒）
     "refill_interval_ms": 4000
   },
   "tcp_keepalive": {
     "time_secs": 60,
     "interval_secs": 10
+  },
+  // 评分权重：调整延迟、抖动、丢包对评分的影响
+  "scoring": {
+    "base_score": 100.0,
+    "latency_penalty_per_10ms": 1.0,
+    "jitter_penalty_per_5ms": 1.0,
+    "loss_penalty_per_percent": 50.0
   }
 }
 ```
@@ -90,6 +95,7 @@
     *   `selection_random_n_subnets`: 每次建立连接时，从优选 IP 段中随机选取的 IP 段数量。
     *   `selection_random_m_ips`: 在每个选中的 IP 段内，随机生成的 IP 数量。
     *   *说明：总并发连接尝试数 = n * m*
+    *   `staggered_delay_ms`: Happy Eyeballs 竞速连接的交错延迟（毫秒），范围 10-2000（默认 200）。优先给高质量 IP 握手时间，减少不必要的并发 SYN 包。
 *   **扫描策略 (`scan_strategy`)**:
     *   `type`: 扫描策略类型，可选 `"adaptive"` (自适应，推荐) 或 `"full_scan"` (全量扫描)。
     *   `initial_scan_mask`: [自适应] 阶段一（广域稀疏扫描）使用的 CIDR 掩码（默认 20）。
@@ -109,6 +115,12 @@
 *   **TCP Keepalive (`tcp_keepalive`)**:
     *   `time_secs`: Keepalive 空闲时间（秒）（默认 60）。
     *   `interval_secs`: Keepalive 探测间隔（秒）（默认 10）。
+*   **评分权重 (`scoring`)**:
+    *   `base_score`: 基础分数（默认 100，必须 > 0）。
+    *   `latency_penalty_per_10ms`: 延迟惩罚系数，每 10ms 扣分（默认 1.0）。
+    *   `jitter_penalty_per_5ms`: 抖动惩罚系数，每 5ms 扣分（默认 1.0）。
+    *   `loss_penalty_per_percent`: 丢包惩罚系数，每 1% 丢包扣分（默认 50.0）。
+    *   *公式：评分 = base_score - latency/10×系数 - jitter/5×系数 - loss%×系数*
 
 **注意**：配置文件支持 JSONC 格式（允许 `//` 和 `/* */` 注释）。所有配置参数均会自动验证，不合法时程序拒绝启动并显示错误消息。
 
@@ -167,6 +179,32 @@ cargo build --release
 构建产物位于 `target/release/tcp-forwarder-rust` (Linux/macOS) 或 `target/release/tcp-forwarder-rust.exe` (Windows)。
 
 ## 最近改进
+
+### v0.2.8 (2026-02-21)
+
+**核心改进：**
+
+1.  **可靠性与正确性修复**:
+    - **Accept 循环非阻塞化**：将 FD 信号量获取从 accept 循环移入 `tokio::spawn` 内部，防止信号量耗尽时整个 accept 循环被挂起、无法接收新连接。
+    - **消除假 async 方法**：移除 `pool.rs` 中 `acquire`/`snapshot`/`push` 等方法上无意义的 `async` 标记，消除误导性 API。
+    - **连接池单锁 purge**：将 `purge_stale()` 从双次加锁改为单次加锁内 retain，消除两次加锁间的 cache miss 窗口。
+
+2.  **扫描器模块化重构**:
+    - 将原 `scanner.rs`（~981 行）拆分为 `scanner/mod.rs`、`scanner/executor.rs`、`scanner/probe.rs`、`scanner/asn.rs` 四个子模块，严格遵守文件不超过 1000 行的规范。
+
+3.  **转发指标与可观测性**:
+    - 新增 `metrics.rs` 模块，基于原子操作实现无锁转发统计（活跃连接数、竞速成功率、吞吐字节数等）。
+    - 新增 `/api/v1/stats` 端点，实时查看转发服务运行指标。
+    - 新增 `/debug` 端点，输出调试级别的内部状态。
+
+4.  **评分权重可配置化**:
+    - 新增 `scoring` 配置块，支持自定义基础分、延迟/抖动/丢包惩罚系数，适应不同网络场景对质量指标的侧重需求。
+    - 配置参数带完整验证（`base_score > 0`，惩罚系数 `>= 0`）。
+
+5.  **代码规范与质量**:
+    - 消除 `pool.rs` 中残留的 `else` 分支，统一使用卫语句模式。
+    - `state.rs` 中 `filter_subnets_by_colo` 结果缓存化，避免高频转发场景下重复构建 `HashSet`。
+    - 修复 `main.rs` 中 `unwrap_or(())` 吞掉 `spawn_blocking` panic 信息的问题。
 
 ### v0.2.7 (2026-02-20)
 
@@ -296,6 +334,8 @@ cargo build --release
 *   **健康检查**: `http://localhost:3000/health`
 *   **子网列表 (带元数据)**: `http://localhost:3000/api/v1/subnets`
 *   **连接池统计**: `http://localhost:3000/api/v1/pool`（未启用时返回 404）
+*   **转发统计**: `http://localhost:3000/api/v1/stats`
+*   **调试信息**: `http://localhost:3000/debug`
 
 ### IP 段状态示例
 
@@ -329,5 +369,19 @@ cargo build --release
   "dead": 3,
   "evicted": 0,
   "cleaned": 10
+}
+```
+
+### 转发统计示例
+
+```json
+{
+  "total_connections": 1024,
+  "active_connections": 5,
+  "race_successes": 980,
+  "race_failures": 44,
+  "pool_hits": 512,
+  "bytes_tx": 10485760,
+  "bytes_rx": 52428800
 }
 ```

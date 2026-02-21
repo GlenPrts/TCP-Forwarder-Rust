@@ -1,6 +1,6 @@
 [package]
 name = "tcp-forwarder-rust"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 description = "高性能 TCP 转发器，支持 Cloudflare 优选 IP"
 license = "MIT"

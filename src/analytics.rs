@@ -17,8 +17,7 @@ impl ColoStats {
     fn add(&mut self, subnet: &SubnetQuality) {
         self.total_score += subnet.score;
         // 使用 saturating_add 防止整数溢出
-        self.total_latency =
-            self.total_latency.saturating_add(subnet.avg_latency);
+        self.total_latency = self.total_latency.saturating_add(subnet.avg_latency);
         self.total_jitter = self.total_jitter.saturating_add(subnet.avg_jitter);
         self.total_loss_rate += subnet.avg_loss_rate;
         self.count = self.count.saturating_add(1);
@@ -27,10 +26,8 @@ impl ColoStats {
     /// 合并另一个统计信息
     fn merge(&mut self, other: Self) {
         self.total_score += other.total_score;
-        self.total_latency =
-            self.total_latency.saturating_add(other.total_latency);
-        self.total_jitter =
-            self.total_jitter.saturating_add(other.total_jitter);
+        self.total_latency = self.total_latency.saturating_add(other.total_latency);
+        self.total_jitter = self.total_jitter.saturating_add(other.total_jitter);
         self.total_loss_rate += other.total_loss_rate;
         self.count = self.count.saturating_add(other.count);
     }
@@ -127,12 +124,7 @@ pub fn print_colo_ranking(ip_manager: &IpManager) {
     // 打印表头
     println!(
         "{:<8} | {:>10} | {:>12} | {:>10} | {:>10} | {:>12}",
-        "Colo",
-        "Avg Score",
-        "Avg Latency",
-        "Avg Jitter",
-        "Loss Rate",
-        "Subnet Count"
+        "Colo", "Avg Score", "Avg Latency", "Avg Jitter", "Loss Rate", "Subnet Count"
     );
     println!("{}", "-".repeat(75));
 
@@ -160,11 +152,7 @@ mod tests {
     use chrono::Utc;
     use ipnet::IpNet;
 
-    fn create_test_subnet(
-        colo: &str,
-        score: f32,
-        latency: u64,
-    ) -> SubnetQuality {
+    fn create_test_subnet(colo: &str, score: f32, latency: u64) -> SubnetQuality {
         SubnetQuality {
             subnet: "1.2.3.0/24".parse::<IpNet>().unwrap(),
             score,

@@ -1,5 +1,6 @@
 mod analytics;
 mod config;
+mod metrics;
 mod model;
 mod pool;
 mod scanner;
@@ -11,6 +12,7 @@ mod web;
 use std::sync::Arc;
 
 use config::AppConfig;
+use metrics::ForwardMetrics;
 use pool::{run_refill_loop, ConnectionPool};
 use scanner::{run_background_scan, run_scan_once};
 use server::start_server;
@@ -128,8 +130,7 @@ async fn run_scan_mode(config: Arc<AppConfig>, ip_manager: IpManager) {
 
     let path = config.ip_store_file.clone();
     let manager = ip_manager.clone();
-    let save_result =
-        tokio::task::spawn_blocking(move || manager.save_to_file(&path)).await;
+    let save_result = tokio::task::spawn_blocking(move || manager.save_to_file(&path)).await;
 
     match save_result {
         Ok(Ok(_)) => info!("Scan results saved to {}", config.ip_store_file),
@@ -145,9 +146,7 @@ async fn run_scan_mode(config: Arc<AppConfig>, ip_manager: IpManager) {
 ///
 /// # 返回值
 /// 连接池实例（如果启用）
-fn create_connection_pool(
-    config: &Arc<AppConfig>,
-) -> Option<Arc<ConnectionPool>> {
+fn create_connection_pool(config: &Arc<AppConfig>) -> Option<Arc<ConnectionPool>> {
     if !config.connection_pool.enabled {
         return None;
     }
@@ -232,17 +231,20 @@ async fn run_forward_mode(
     scan_on_start: bool,
 ) {
     let cancel_token = CancellationToken::new();
+    let metrics = Arc::new(ForwardMetrics::new());
 
     let pool = create_connection_pool(&config);
 
-    let pool_handle =
-        spawn_pool_refill(&pool, &config, &ip_manager, &cancel_token);
+    let pool_handle = spawn_pool_refill(
+        &pool, &config, &ip_manager, &cancel_token,
+    );
 
     let server_handle = tokio::spawn(start_server(
         config.clone(),
         ip_manager.clone(),
         pool.clone(),
         cancel_token.clone(),
+        metrics.clone(),
     ));
 
     let web_handle = tokio::spawn(start_web_server(
@@ -250,13 +252,11 @@ async fn run_forward_mode(
         ip_manager.clone(),
         pool.clone(),
         cancel_token.clone(),
+        metrics.clone(),
     ));
 
     let scan_handle = spawn_background_scan(
-        &config,
-        &ip_manager,
-        &cancel_token,
-        scan_on_start,
+        &config, &ip_manager, &cancel_token, scan_on_start,
     );
 
     let _ = tokio::signal::ctrl_c().await;
@@ -264,8 +264,10 @@ async fn run_forward_mode(
 
     cancel_token.cancel();
 
-    graceful_shutdown(server_handle, web_handle, scan_handle, pool_handle)
-        .await;
+    graceful_shutdown(
+        server_handle, web_handle, scan_handle, pool_handle,
+    )
+    .await;
 }
 
 /// 启动后台扫描任务（如果配置启用）
@@ -327,10 +329,8 @@ async fn main() {
     let manager = ip_manager.clone();
     let path = config.ip_store_file.clone();
     let top_k = config.selection_top_k_percent;
-    let load_result = tokio::task::spawn_blocking(move || {
-        manager.load_from_file(&path, top_k)
-    })
-    .await;
+    let load_result =
+        tokio::task::spawn_blocking(move || manager.load_from_file(&path, top_k)).await;
 
     match load_result {
         Ok(Ok(_)) => info!("Loaded IPs from {}", config.ip_store_file),
@@ -344,11 +344,13 @@ async fn main() {
 
     if cli_args.rank_colos {
         let manager = ip_manager.clone();
-        tokio::task::spawn_blocking(move || {
+        let join_result = tokio::task::spawn_blocking(move || {
             analytics::print_colo_ranking(&manager);
         })
-        .await
-        .unwrap_or(());
+        .await;
+        if let Err(e) = join_result {
+            error!("Failed to join rank task: {}", e);
+        }
         return;
     }
 

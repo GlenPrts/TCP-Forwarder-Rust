@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use ipnet::IpNet;
 use rand::prelude::*;
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -19,6 +20,8 @@ pub struct IpManager {
     subnets: Arc<DashMap<IpNet, SubnetQuality>>,
     /// 最佳子网缓存（top K%）
     best_subnets_cache: Arc<ArcSwap<Vec<IpNet>>>,
+    /// 按 colo 分组的最佳子网缓存
+    best_by_colo: Arc<ArcSwap<HashMap<String, Vec<IpNet>>>>,
     /// 全局资源限制（FD 信号量）
     fd_semaphore: Arc<Semaphore>,
 }
@@ -34,7 +37,12 @@ impl IpManager {
     pub fn new() -> Self {
         Self {
             subnets: Arc::new(DashMap::new()),
-            best_subnets_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            best_subnets_cache: Arc::new(
+                ArcSwap::from_pointee(Vec::new()),
+            ),
+            best_by_colo: Arc::new(
+                ArcSwap::from_pointee(HashMap::new()),
+            ),
             fd_semaphore: Arc::new(Semaphore::new(1024)),
         }
     }
@@ -121,30 +129,49 @@ impl IpManager {
 
     /// 重新计算最佳子网缓存
     pub fn recalculate_best_subnets(&self, top_k_percent: f64) {
-        let mut all_subnets: Vec<SubnetQuality> =
-            self.subnets.iter().map(|e| e.value().clone()).collect();
+        let mut all_subnets: Vec<SubnetQuality> = self
+            .subnets
+            .iter()
+            .map(|e| e.value().clone())
+            .collect();
 
         if all_subnets.is_empty() {
             self.best_subnets_cache.store(Arc::new(Vec::new()));
+            self.best_by_colo.store(
+                Arc::new(HashMap::new()),
+            );
             return;
         }
 
-        all_subnets.par_sort_by(|a, b| b.score.total_cmp(&a.score));
+        all_subnets
+            .par_sort_by(|a, b| b.score.total_cmp(&a.score));
 
         let total = all_subnets.len();
         let k = calculate_top_k(total, top_k_percent);
 
+        let top_slice = &all_subnets[..k];
         let top_subnets: Vec<IpNet> =
-            all_subnets.iter().take(k).map(|q| q.subnet).collect();
+            top_slice.iter().map(|q| q.subnet).collect();
+
+        let mut colo_map: HashMap<String, Vec<IpNet>> =
+            HashMap::new();
+        for q in top_slice {
+            colo_map
+                .entry(q.colo.clone())
+                .or_default()
+                .push(q.subnet);
+        }
 
         debug!(
-            "Recalculated best subnets: {} out of {} (top {:.1}%)",
+            "Recalculated best subnets: {} of {} (top {:.1}%)",
             k,
             total,
             top_k_percent * 100.0
         );
 
-        self.best_subnets_cache.store(Arc::new(top_subnets));
+        self.best_subnets_cache
+            .store(Arc::new(top_subnets));
+        self.best_by_colo.store(Arc::new(colo_map));
     }
 
     pub fn best_cache_len(&self) -> usize {
@@ -154,7 +181,7 @@ impl IpManager {
     /// 获取用于转发的目标 IP 列表
     ///
     /// 策略：
-    /// 1. 从缓存的最佳子网中按 colo 过滤（如果指定）
+    /// 1. 从缓存的最佳子网中按 colo 过滤
     /// 2. 随机选择 n 个子网
     /// 3. 从每个选中的子网中随机生成 m 个 IP
     pub fn get_target_ips(
@@ -163,15 +190,8 @@ impl IpManager {
         n_subnets: usize,
         m_ips: usize,
     ) -> Vec<IpAddr> {
-        let best_subnets = self.best_subnets_cache.load();
-
-        if best_subnets.is_empty() {
-            debug!("Best subnets cache is empty");
-            return Vec::new();
-        }
-
         let candidates =
-            self.filter_subnets_by_colo(&best_subnets, target_colos);
+            self.get_colo_filtered_subnets(target_colos);
 
         if candidates.is_empty() {
             debug!("No candidates after colo filtering");
@@ -179,35 +199,33 @@ impl IpManager {
         }
 
         let mut rng = rand::thread_rng();
-        let selected_subnets =
-            self.select_subnets(&candidates, n_subnets, &mut rng);
+        let selected = self.select_subnets(
+            &candidates, n_subnets, &mut rng,
+        );
 
-        self.generate_ips_from_subnets(&selected_subnets, m_ips, &mut rng)
+        self.generate_ips_from_subnets(
+            &selected, m_ips, &mut rng,
+        )
     }
 
-    /// 按 Colo 过滤子网
-    fn filter_subnets_by_colo(
+    /// 从缓存中获取 colo 过滤后的子网列表
+    fn get_colo_filtered_subnets(
         &self,
-        subnets: &[IpNet],
         target_colos: &[String],
     ) -> Vec<IpNet> {
         if target_colos.is_empty() {
-            return subnets.to_vec();
+            let best = self.best_subnets_cache.load();
+            return (**best).clone();
         }
 
-        let target_colo_set: std::collections::HashSet<_> =
-            target_colos.iter().collect();
-
-        subnets
-            .iter()
-            .filter(|&subnet| {
-                self.subnets
-                    .get(subnet)
-                    .map(|entry| target_colo_set.contains(&entry.value().colo))
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect()
+        let colo_map = self.best_by_colo.load();
+        let mut result = Vec::new();
+        for colo in target_colos {
+            if let Some(subnets) = colo_map.get(colo) {
+                result.extend_from_slice(subnets);
+            }
+        }
+        result
     }
 
     /// 随机选择子网
@@ -220,7 +238,10 @@ impl IpManager {
         if candidates.len() <= n {
             return candidates.to_vec();
         }
-        candidates.choose_multiple(rng, n).cloned().collect()
+        candidates
+            .choose_multiple(rng, n)
+            .cloned()
+            .collect()
     }
 
     /// 从子网生成 IP
@@ -264,8 +285,7 @@ impl IpManager {
         }
         if max < current {
             let diff = current - max;
-            if let Ok(permit) = self.fd_semaphore.try_acquire_many(diff as u32)
-            {
+            if let Ok(permit) = self.fd_semaphore.try_acquire_many(diff as u32) {
                 permit.forget();
                 debug!("Decreased FD semaphore permits to {}", max);
                 return;

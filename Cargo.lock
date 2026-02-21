@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "tcp-forwarder-rust"
-version = "0.2.1"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "arc-swap",

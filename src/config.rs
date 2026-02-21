@@ -58,6 +58,81 @@ pub enum ConfigError {
 
     #[error("staggered_delay_ms must be between 10 and 2000, got {0}")]
     InvalidStaggeredDelay(u64),
+
+    #[error("scoring.base_score must be > 0, got {0}")]
+    InvalidBaseScore(f32),
+
+    #[error("scoring.latency_penalty_per_10ms must be >= 0, got {0}")]
+    InvalidLatencyPenalty(f32),
+
+    #[error("scoring.jitter_penalty_per_5ms must be >= 0, got {0}")]
+    InvalidJitterPenalty(f32),
+
+    #[error("scoring.loss_penalty_per_percent must be >= 0, got {0}")]
+    InvalidLossPenalty(f32),
+}
+
+/// 评分权重配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoringConfig {
+    /// 基础分数
+    #[serde(default = "default_base_score")]
+    pub base_score: f32,
+
+    /// 延迟惩罚系数（每 10ms 扣分）
+    #[serde(default = "default_latency_penalty")]
+    pub latency_penalty_per_10ms: f32,
+
+    /// 抖动惩罚系数（每 5ms 扣分）
+    #[serde(default = "default_jitter_penalty")]
+    pub jitter_penalty_per_5ms: f32,
+
+    /// 丢包惩罚系数（每 1% 丢包扣分）
+    #[serde(default = "default_loss_penalty")]
+    pub loss_penalty_per_percent: f32,
+}
+
+fn default_base_score() -> f32 {
+    100.0
+}
+fn default_latency_penalty() -> f32 {
+    1.0
+}
+fn default_jitter_penalty() -> f32 {
+    1.0
+}
+fn default_loss_penalty() -> f32 {
+    50.0
+}
+
+impl Default for ScoringConfig {
+    fn default() -> Self {
+        Self {
+            base_score: default_base_score(),
+            latency_penalty_per_10ms: default_latency_penalty(),
+            jitter_penalty_per_5ms: default_jitter_penalty(),
+            loss_penalty_per_percent: default_loss_penalty(),
+        }
+    }
+}
+
+impl ScoringConfig {
+    /// 验证评分权重配置
+    pub fn validate(&self) -> Result<()> {
+        if self.base_score <= 0.0 {
+            return Err(ConfigError::InvalidBaseScore(self.base_score).into());
+        }
+        if self.latency_penalty_per_10ms < 0.0 {
+            return Err(ConfigError::InvalidLatencyPenalty(self.latency_penalty_per_10ms).into());
+        }
+        if self.jitter_penalty_per_5ms < 0.0 {
+            return Err(ConfigError::InvalidJitterPenalty(self.jitter_penalty_per_5ms).into());
+        }
+        if self.loss_penalty_per_percent < 0.0 {
+            return Err(ConfigError::InvalidLossPenalty(self.loss_penalty_per_percent).into());
+        }
+        Ok(())
+    }
 }
 
 /// TCP Keepalive 配置
@@ -282,9 +357,7 @@ impl ScanStrategyConfig {
             if self.initial_scan_mask < 8 || self.initial_scan_mask > 32 {
                 return Err(ConfigError::InvalidInitialScanMask.into());
             }
-            if self.promising_subnet_percent <= 0.0
-                || self.promising_subnet_percent >= 1.0
-            {
+            if self.promising_subnet_percent <= 0.0 || self.promising_subnet_percent >= 1.0 {
                 return Err(ConfigError::InvalidPromisingSubnetPercent(
                     self.promising_subnet_percent,
                 )
@@ -368,6 +441,10 @@ pub struct AppConfig {
     /// TCP Keepalive 配置
     #[serde(default)]
     pub tcp_keepalive: TcpKeepaliveConfig,
+
+    /// 评分权重配置
+    #[serde(default)]
+    pub scoring: ScoringConfig,
 }
 
 fn default_top_k_percent() -> f64 {
@@ -409,8 +486,7 @@ impl Default for AppConfig {
             ],
             bind_addr: "0.0.0.0:8080".parse().unwrap(),
             web_addr: "0.0.0.0:3000".parse().unwrap(),
-            trace_url: "http://engage.cloudflareclient.com/cdn-cgi/trace"
-                .to_string(),
+            trace_url: "http://engage.cloudflareclient.com/cdn-cgi/trace".to_string(),
             asn_url: "https://asn.0x01111110.com/13335?4".to_string(),
             ip_store_file: "subnet_results.json".to_string(),
             selection_top_k_percent: default_top_k_percent(),
@@ -424,6 +500,7 @@ impl Default for AppConfig {
             max_subnets: default_max_subnets(),
             subnet_ttl_secs: default_subnet_ttl_secs(),
             tcp_keepalive: TcpKeepaliveConfig::default(),
+            scoring: ScoringConfig::default(),
         }
     }
 }
@@ -432,15 +509,12 @@ impl AppConfig {
     /// 从文件加载配置（支持 JSONC 格式，允许注释）
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let file = File::open(path).with_context(|| {
-            format!("Failed to open config file: {}", path.display())
-        })?;
+        let file = File::open(path)
+            .with_context(|| format!("Failed to open config file: {}", path.display()))?;
         let reader = BufReader::new(file);
         let stripped = StripComments::new(reader);
-        let config: Self =
-            serde_json::from_reader(stripped).with_context(|| {
-                format!("Failed to parse config file: {}", path.display())
-            })?;
+        let config: Self = serde_json::from_reader(stripped)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
         config.validate()?;
         Ok(config)
     }
@@ -459,13 +533,8 @@ impl AppConfig {
             return Err(ConfigError::InvalidTargetPort.into());
         }
 
-        if self.selection_top_k_percent <= 0.0
-            || self.selection_top_k_percent > 1.0
-        {
-            return Err(ConfigError::InvalidTopKPercent(
-                self.selection_top_k_percent,
-            )
-            .into());
+        if self.selection_top_k_percent <= 0.0 || self.selection_top_k_percent > 1.0 {
+            return Err(ConfigError::InvalidTopKPercent(self.selection_top_k_percent).into());
         }
 
         if self.selection_random_n_subnets == 0 {
@@ -477,10 +546,7 @@ impl AppConfig {
         }
 
         if self.staggered_delay_ms < 10 || self.staggered_delay_ms > 2000 {
-            return Err(ConfigError::InvalidStaggeredDelay(
-                self.staggered_delay_ms,
-            )
-            .into());
+            return Err(ConfigError::InvalidStaggeredDelay(self.staggered_delay_ms).into());
         }
 
         if self.cidr_list.is_empty() {
@@ -516,6 +582,7 @@ impl AppConfig {
         self.scan_strategy.validate()?;
         self.background_scan.validate()?;
         self.connection_pool.validate()?;
+        self.scoring.validate()?;
         Ok(())
     }
 
@@ -628,5 +695,32 @@ mod tests {
         // 并发数为 0
         config.background_scan.concurrency = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_scoring_config_validation() {
+        let mut config = AppConfig::default();
+        assert!(config.validate().is_ok());
+
+        config.scoring.base_score = 0.0;
+        assert!(config.validate().is_err());
+
+        config.scoring.base_score = -1.0;
+        assert!(config.validate().is_err());
+
+        config.scoring.base_score = 100.0;
+        assert!(config.validate().is_ok());
+
+        config.scoring.latency_penalty_per_10ms = -0.1;
+        assert!(config.validate().is_err());
+
+        config.scoring.latency_penalty_per_10ms = 0.0;
+        assert!(config.validate().is_ok());
+
+        config.scoring.loss_penalty_per_percent = -1.0;
+        assert!(config.validate().is_err());
+
+        config.scoring.loss_penalty_per_percent = 50.0;
+        assert!(config.validate().is_ok());
     }
 }

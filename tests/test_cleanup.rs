@@ -56,11 +56,7 @@ async fn test_connection_cleanup_timing() {
         let target_addr = SocketAddr::new(ip, addr.port());
         tasks.push(async move {
             let _guard = TestStream { id: idx, ip };
-            let result = timeout(
-                Duration::from_millis(500),
-                TcpStream::connect(target_addr),
-            )
-            .await;
+            let result = timeout(Duration::from_millis(500), TcpStream::connect(target_addr)).await;
             match result {
                 Ok(Ok(_)) => {
                     println!("[CONNECT] IP#{} {} SUCCESS", idx, ip);

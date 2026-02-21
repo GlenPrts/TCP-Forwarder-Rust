@@ -1,21 +1,10 @@
+use crate::config::ScoringConfig;
 use chrono::{DateTime, Utc};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use tracing::debug;
-
-/// 评分计算常量
-mod scoring {
-    /// 基础分数
-    pub const BASE_SCORE: f32 = 100.0;
-    /// 延迟惩罚系数（每 10ms 扣 1 分）
-    pub const LATENCY_PENALTY_PER_10MS: f32 = 1.0;
-    /// 抖动惩罚系数（每 5ms 扣 1 分，比延迟更严重）
-    pub const JITTER_PENALTY_PER_5MS: f32 = 1.0;
-    /// 丢包惩罚系数（每 1% 丢包扣 50 分）
-    pub const LOSS_PENALTY_PER_PERCENT: f32 = 50.0;
-}
 
 /// 子网质量数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +127,7 @@ impl IpQuality {
         jitter: u128,
         loss_rate: f32,
         colo: String,
+        scoring: &ScoringConfig,
     ) -> Self {
         let mut quality = Self {
             ip,
@@ -148,40 +138,28 @@ impl IpQuality {
             colo,
             last_updated: Utc::now(),
         };
-        quality.calculate_score();
+        quality.calculate_score(scoring);
         quality
     }
 
     /// 计算综合评分
     ///
     /// 评分算法：
-    /// - 基础分：100
-    /// - 延迟惩罚：每 10ms 扣 1 分
-    /// - 抖动惩罚：每 5ms 扣 1 分（抖动比延迟更影响体验）
-    /// - 丢包惩罚：每 1% 丢包扣 50 分（调整为更温和的惩罚，避免负分）
-    pub fn calculate_score(&mut self) {
-        use scoring::*;
+    /// - 基础分：可配置（默认 100）
+    /// - 延迟惩罚：每 10ms 扣分（可配置）
+    /// - 抖动惩罚：每 5ms 扣分（可配置）
+    /// - 丢包惩罚：每 1% 丢包扣分（可配置）
+    pub fn calculate_score(&mut self, cfg: &ScoringConfig) {
+        let latency_penalty = (self.latency as f32) / 10.0 * cfg.latency_penalty_per_10ms;
+        let jitter_penalty = (self.jitter as f32) / 5.0 * cfg.jitter_penalty_per_5ms;
+        let loss_penalty = self.loss_rate * 100.0 * cfg.loss_penalty_per_percent;
 
-        let latency_penalty =
-            (self.latency as f32) / 10.0 * LATENCY_PENALTY_PER_10MS;
-        let jitter_penalty =
-            (self.jitter as f32) / 5.0 * JITTER_PENALTY_PER_5MS;
-        // 调整丢包惩罚：每 1% 丢包扣 50 分
-        let loss_penalty = self.loss_rate * 100.0 * LOSS_PENALTY_PER_PERCENT;
-
-        let score =
-            (BASE_SCORE - latency_penalty - jitter_penalty - loss_penalty)
-                .max(0.0);
+        let score = (cfg.base_score - latency_penalty - jitter_penalty - loss_penalty).max(0.0);
 
         debug!(
-            "IP {} score: base={}, latency_p={:.2}, jitter_p={:.2}, \
-             loss_p={:.2}, final={:.2}",
-            self.ip,
-            BASE_SCORE,
-            latency_penalty,
-            jitter_penalty,
-            loss_penalty,
-            score
+            "IP {} score: base={}, latency_p={:.2}, \
+             jitter_p={:.2}, loss_p={:.2}, final={:.2}",
+            self.ip, cfg.base_score, latency_penalty, jitter_penalty, loss_penalty, score
         );
 
         self.score = score;
@@ -191,42 +169,46 @@ impl IpQuality {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ScoringConfig;
 
     #[test]
     fn test_ip_quality_score_calculation() {
-        // 完美的 IP：0 延迟，0 抖动，0 丢包
+        let sc = ScoringConfig::default();
+
         let quality = IpQuality::new(
             "1.2.3.4".parse().unwrap(),
             0,
             0,
             0.0,
             "LAX".to_string(),
+            &sc,
         );
         assert_eq!(quality.score, 100.0);
 
-        // 100ms 延迟
         let quality = IpQuality::new(
             "1.2.3.4".parse().unwrap(),
             100,
             0,
             0.0,
             "LAX".to_string(),
+            &sc,
         );
-        assert_eq!(quality.score, 90.0); // 100 - 10
+        assert_eq!(quality.score, 90.0);
 
-        // 1% 丢包（每 1% 扣 50 分）
         let quality = IpQuality::new(
             "1.2.3.4".parse().unwrap(),
             0,
             0,
             0.01,
             "LAX".to_string(),
+            &sc,
         );
-        assert_eq!(quality.score, 50.0); // 100 - 50 = 50
+        assert_eq!(quality.score, 50.0);
     }
 
     #[test]
     fn test_subnet_quality_from_samples() {
+        let sc = ScoringConfig::default();
         let samples = vec![
             IpQuality::new(
                 "1.2.3.1".parse().unwrap(),
@@ -234,6 +216,7 @@ mod tests {
                 10,
                 0.0,
                 "LAX".to_string(),
+                &sc,
             ),
             IpQuality::new(
                 "1.2.3.2".parse().unwrap(),
@@ -241,6 +224,7 @@ mod tests {
                 15,
                 0.0,
                 "LAX".to_string(),
+                &sc,
             ),
         ];
 
@@ -248,12 +232,13 @@ mod tests {
         let quality = SubnetQuality::new(subnet, &samples);
 
         assert_eq!(quality.sample_count, 2);
-        assert_eq!(quality.avg_latency, 110); // (100 + 120) / 2
+        assert_eq!(quality.avg_latency, 110);
         assert_eq!(quality.colo, "LAX");
     }
 
     #[test]
     fn test_determine_primary_colo() {
+        let sc = ScoringConfig::default();
         let samples = vec![
             IpQuality::new(
                 "1.2.3.1".parse().unwrap(),
@@ -261,6 +246,7 @@ mod tests {
                 10,
                 0.0,
                 "LAX".to_string(),
+                &sc,
             ),
             IpQuality::new(
                 "1.2.3.2".parse().unwrap(),
@@ -268,6 +254,7 @@ mod tests {
                 10,
                 0.0,
                 "SJC".to_string(),
+                &sc,
             ),
             IpQuality::new(
                 "1.2.3.3".parse().unwrap(),
@@ -275,11 +262,12 @@ mod tests {
                 10,
                 0.0,
                 "LAX".to_string(),
+                &sc,
             ),
         ];
 
         let colo = determine_primary_colo(&samples);
-        assert_eq!(colo, "LAX"); // LAX 出现 2 次，SJC 出现 1 次
+        assert_eq!(colo, "LAX");
     }
 
     #[test]
