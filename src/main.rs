@@ -225,19 +225,13 @@ async fn graceful_shutdown(
 /// - `config`: 应用配置
 /// - `ip_manager`: IP 管理器
 /// - `scan_on_start`: 是否启动时立即扫描
-async fn run_forward_mode(
-    config: Arc<AppConfig>,
-    ip_manager: IpManager,
-    scan_on_start: bool,
-) {
+async fn run_forward_mode(config: Arc<AppConfig>, ip_manager: IpManager, scan_on_start: bool) {
     let cancel_token = CancellationToken::new();
     let metrics = Arc::new(ForwardMetrics::new());
 
     let pool = create_connection_pool(&config);
 
-    let pool_handle = spawn_pool_refill(
-        &pool, &config, &ip_manager, &cancel_token,
-    );
+    let pool_handle = spawn_pool_refill(&pool, &config, &ip_manager, &cancel_token);
 
     let server_handle = tokio::spawn(start_server(
         config.clone(),
@@ -255,19 +249,14 @@ async fn run_forward_mode(
         metrics.clone(),
     ));
 
-    let scan_handle = spawn_background_scan(
-        &config, &ip_manager, &cancel_token, scan_on_start,
-    );
+    let scan_handle = spawn_background_scan(&config, &ip_manager, &cancel_token, scan_on_start);
 
     let _ = tokio::signal::ctrl_c().await;
     info!("Received Ctrl+C, initiating graceful shutdown...");
 
     cancel_token.cancel();
 
-    graceful_shutdown(
-        server_handle, web_handle, scan_handle, pool_handle,
-    )
-    .await;
+    graceful_shutdown(server_handle, web_handle, scan_handle, pool_handle).await;
 }
 
 /// 启动后台扫描任务（如果配置启用）

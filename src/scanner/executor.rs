@@ -168,12 +168,8 @@ where
             let manager = ip_manager.clone();
             let sc = scoring.clone();
             async move {
-                let _permit =
-                    manager.acquire_fd_permit().await.ok();
-                let quality = test_ip(
-                    ip, &url_ref, &host_ref, port, &sc,
-                )
-                .await;
+                let _permit = manager.acquire_fd_permit().await.ok();
+                let quality = test_ip(ip, &url_ref, &host_ref, port, &sc).await;
                 (subnet, quality)
             }
         })

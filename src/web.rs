@@ -3,13 +3,7 @@ use crate::metrics::ForwardMetrics;
 use crate::model::SubnetQuality;
 use crate::pool::ConnectionPool;
 use crate::state::IpManager;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -147,9 +141,7 @@ async fn get_pool_stats(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(Some(snapshot)))
 }
 
-async fn get_forward_stats(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn get_forward_stats(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.metrics.snapshot();
     (StatusCode::OK, Json(snapshot))
 }

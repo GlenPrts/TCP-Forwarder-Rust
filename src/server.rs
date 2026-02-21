@@ -125,10 +125,7 @@ fn handle_accept_result(
         .await;
         metrics.dec_active();
         if let Err(e) = result {
-            debug!(
-                "Connection handling error for {}: {}",
-                client_addr, e
-            );
+            debug!("Connection handling error for {}: {}", client_addr, e);
         }
     });
 }
@@ -161,10 +158,8 @@ async fn handle_connection(
     let _ = client_stream.set_nodelay(true);
     let _ = configure_keepalive(&client_stream, &config);
 
-    let mut remote_stream = connect_to_remote(
-        &config, &ip_manager, &pool, client_addr, metrics,
-    )
-    .await?;
+    let mut remote_stream =
+        connect_to_remote(&config, &ip_manager, &pool, client_addr, metrics).await?;
     // 连接关闭后 peer_addr() 可能失败，提前保存
     let peer = remote_stream
         .peer_addr()
@@ -216,19 +211,13 @@ async fn connect_to_remote(
 ) -> anyhow::Result<TcpStream> {
     if let Some(ref p) = pool {
         if let Some((stream, ip)) = p.acquire() {
-            info!(
-                "Using pooled connection to {} for {}",
-                ip, client_addr
-            );
+            info!("Using pooled connection to {} for {}", ip, client_addr);
             metrics.inc_pool_hit();
             return Ok(stream);
         }
     }
 
-    let stream = connect_via_race(
-        config, ip_manager, client_addr, metrics,
-    )
-    .await?;
+    let stream = connect_via_race(config, ip_manager, client_addr, metrics).await?;
 
     // 延迟配置：仅对竞速胜出者（非池化连接）进行配置
     let _ = stream.set_nodelay(true);
@@ -285,10 +274,7 @@ async fn connect_via_race(
     }
 
     metrics.inc_race_failure();
-    warn!(
-        "All connections failed for {}, falling back",
-        client_addr
-    );
+    warn!("All connections failed for {}, falling back", client_addr);
     perform_fallback(config, ip_manager).await
 }
 

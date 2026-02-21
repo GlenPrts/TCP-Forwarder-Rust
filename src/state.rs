@@ -37,12 +37,8 @@ impl IpManager {
     pub fn new() -> Self {
         Self {
             subnets: Arc::new(DashMap::new()),
-            best_subnets_cache: Arc::new(
-                ArcSwap::from_pointee(Vec::new()),
-            ),
-            best_by_colo: Arc::new(
-                ArcSwap::from_pointee(HashMap::new()),
-            ),
+            best_subnets_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            best_by_colo: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             fd_semaphore: Arc::new(Semaphore::new(1024)),
         }
     }
@@ -129,37 +125,26 @@ impl IpManager {
 
     /// 重新计算最佳子网缓存
     pub fn recalculate_best_subnets(&self, top_k_percent: f64) {
-        let mut all_subnets: Vec<SubnetQuality> = self
-            .subnets
-            .iter()
-            .map(|e| e.value().clone())
-            .collect();
+        let mut all_subnets: Vec<SubnetQuality> =
+            self.subnets.iter().map(|e| e.value().clone()).collect();
 
         if all_subnets.is_empty() {
             self.best_subnets_cache.store(Arc::new(Vec::new()));
-            self.best_by_colo.store(
-                Arc::new(HashMap::new()),
-            );
+            self.best_by_colo.store(Arc::new(HashMap::new()));
             return;
         }
 
-        all_subnets
-            .par_sort_by(|a, b| b.score.total_cmp(&a.score));
+        all_subnets.par_sort_by(|a, b| b.score.total_cmp(&a.score));
 
         let total = all_subnets.len();
         let k = calculate_top_k(total, top_k_percent);
 
         let top_slice = &all_subnets[..k];
-        let top_subnets: Vec<IpNet> =
-            top_slice.iter().map(|q| q.subnet).collect();
+        let top_subnets: Vec<IpNet> = top_slice.iter().map(|q| q.subnet).collect();
 
-        let mut colo_map: HashMap<String, Vec<IpNet>> =
-            HashMap::new();
+        let mut colo_map: HashMap<String, Vec<IpNet>> = HashMap::new();
         for q in top_slice {
-            colo_map
-                .entry(q.colo.clone())
-                .or_default()
-                .push(q.subnet);
+            colo_map.entry(q.colo.clone()).or_default().push(q.subnet);
         }
 
         debug!(
@@ -169,8 +154,7 @@ impl IpManager {
             top_k_percent * 100.0
         );
 
-        self.best_subnets_cache
-            .store(Arc::new(top_subnets));
+        self.best_subnets_cache.store(Arc::new(top_subnets));
         self.best_by_colo.store(Arc::new(colo_map));
     }
 
@@ -190,8 +174,7 @@ impl IpManager {
         n_subnets: usize,
         m_ips: usize,
     ) -> Vec<IpAddr> {
-        let candidates =
-            self.get_colo_filtered_subnets(target_colos);
+        let candidates = self.get_colo_filtered_subnets(target_colos);
 
         if candidates.is_empty() {
             debug!("No candidates after colo filtering");
@@ -199,20 +182,13 @@ impl IpManager {
         }
 
         let mut rng = rand::thread_rng();
-        let selected = self.select_subnets(
-            &candidates, n_subnets, &mut rng,
-        );
+        let selected = self.select_subnets(&candidates, n_subnets, &mut rng);
 
-        self.generate_ips_from_subnets(
-            &selected, m_ips, &mut rng,
-        )
+        self.generate_ips_from_subnets(&selected, m_ips, &mut rng)
     }
 
     /// 从缓存中获取 colo 过滤后的子网列表
-    fn get_colo_filtered_subnets(
-        &self,
-        target_colos: &[String],
-    ) -> Vec<IpNet> {
+    fn get_colo_filtered_subnets(&self, target_colos: &[String]) -> Vec<IpNet> {
         if target_colos.is_empty() {
             let best = self.best_subnets_cache.load();
             return (**best).clone();
@@ -229,19 +205,11 @@ impl IpManager {
     }
 
     /// 随机选择子网
-    fn select_subnets(
-        &self,
-        candidates: &[IpNet],
-        n: usize,
-        rng: &mut impl Rng,
-    ) -> Vec<IpNet> {
+    fn select_subnets(&self, candidates: &[IpNet], n: usize, rng: &mut impl Rng) -> Vec<IpNet> {
         if candidates.len() <= n {
             return candidates.to_vec();
         }
-        candidates
-            .choose_multiple(rng, n)
-            .cloned()
-            .collect()
+        candidates.choose_multiple(rng, n).cloned().collect()
     }
 
     /// 从子网生成 IP

@@ -104,15 +104,13 @@ pub(super) async fn test_ip(
     scoring: &ScoringConfig,
 ) -> Option<IpQuality> {
     let client = build_probe_client(ip, host, port)?;
-    let (latencies, success_count, last_colo) =
-        run_probes(&client, trace_url).await;
+    let (latencies, success_count, last_colo) = run_probes(&client, trace_url).await;
 
     if success_count == 0 {
         return None;
     }
 
-    let loss_rate =
-        1.0 - (success_count as f32 / PROBE_COUNT as f32);
+    let loss_rate = 1.0 - (success_count as f32 / PROBE_COUNT as f32);
     let avg_latency = calculate_average(&latencies);
     let jitter = calculate_jitter(&latencies);
 
