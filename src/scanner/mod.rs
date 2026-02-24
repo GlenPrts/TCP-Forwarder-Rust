@@ -107,10 +107,21 @@ async fn run_full_scan(
 ) -> ScanStats {
     let mask = FOCUSED_SCAN_SUBNET_MASK;
     let root_cidrs_vec = root_cidrs.to_vec();
-    let target_subnets =
-        tokio::task::spawn_blocking(move || split_cidrs_to_subnets(root_cidrs_vec, mask))
-            .await
-            .unwrap_or_default();
+    let target_subnets = match tokio::task::spawn_blocking(
+        move || {
+            split_cidrs_to_subnets(root_cidrs_vec, mask)
+        },
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "split_cidrs task failed: {}", e
+            );
+            return ScanStats::default();
+        }
+    };
     info!("Total target subnets to scan: {}", target_subnets.len());
 
     let samples = config.scan_strategy.focused_samples_per_subnet;
@@ -139,11 +150,23 @@ async fn run_full_scan(
     let manager = ip_manager.clone();
     let cfg = config.clone();
     let top_k = config.selection_top_k_percent;
-    let updated_subnets = tokio::task::spawn_blocking(move || {
-        aggregate_and_persist(subnet_results, &manager, &cfg, top_k)
-    })
-    .await
-    .unwrap_or(0);
+    let updated_subnets =
+        match tokio::task::spawn_blocking(move || {
+            aggregate_and_persist(
+                subnet_results, &manager, &cfg, top_k,
+            )
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "aggregate task failed: {}",
+                    e
+                );
+                0
+            }
+        };
 
     ScanStats {
         total_scanned,
@@ -176,9 +199,23 @@ async fn run_adaptive_scan(
 
     let promising_percent = config.scan_strategy.promising_subnet_percent;
     let hot_spots =
-        tokio::task::spawn_blocking(move || analyze_hot_spots(initial_results, promising_percent))
-            .await
-            .unwrap_or_default();
+        match tokio::task::spawn_blocking(move || {
+            analyze_hot_spots(
+                initial_results,
+                promising_percent,
+            )
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "hot spot analysis failed: {}",
+                    e
+                );
+                Vec::new()
+            }
+        };
 
     if hot_spots.is_empty() {
         warn!("No promising subnets found in phase 1. Aborting scan.");
@@ -195,11 +232,26 @@ async fn run_adaptive_scan(
     let top_k = config.selection_top_k_percent;
     let manager = ip_manager.clone();
     let cfg = config.clone();
-    let updated_subnets = tokio::task::spawn_blocking(move || {
-        aggregate_and_persist(focused_results, &manager, &cfg, top_k)
-    })
-    .await
-    .unwrap_or(0);
+    let updated_subnets =
+        match tokio::task::spawn_blocking(move || {
+            aggregate_and_persist(
+                focused_results,
+                &manager,
+                &cfg,
+                top_k,
+            )
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "aggregate task failed: {}",
+                    e
+                );
+                0
+            }
+        };
 
     ScanStats {
         total_scanned: initial_total + focused_total,
@@ -228,9 +280,21 @@ async fn run_initial_scan(
     info!("[Phase 1/3] Starting wide and sparse scan...");
     let mask = strategy.initial_scan_mask;
     let root_cidrs_vec = root_cidrs.to_vec();
-    let subnets = tokio::task::spawn_blocking(move || split_cidrs_to_subnets(root_cidrs_vec, mask))
+    let subnets =
+        match tokio::task::spawn_blocking(move || {
+            split_cidrs_to_subnets(root_cidrs_vec, mask)
+        })
         .await
-        .unwrap_or_default();
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "split_cidrs task failed: {}",
+                    e
+                );
+                Vec::new()
+            }
+        };
     info!(
         "[Phase 1/3] Split into {} /{} subnets.",
         subnets.len(),
@@ -326,11 +390,24 @@ async fn run_focused_scan(
 
     info!("[Phase 3/3] Starting focused scan on hot spots...");
     let hot_spots_vec = hot_spots.to_vec();
-    let subnets = tokio::task::spawn_blocking(move || {
-        split_cidrs_to_subnets(hot_spots_vec, FOCUSED_SCAN_SUBNET_MASK)
-    })
-    .await
-    .unwrap_or_default();
+    let subnets =
+        match tokio::task::spawn_blocking(move || {
+            split_cidrs_to_subnets(
+                hot_spots_vec,
+                FOCUSED_SCAN_SUBNET_MASK,
+            )
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "split_cidrs task failed: {}",
+                    e
+                );
+                Vec::new()
+            }
+        };
     info!(
         "[Phase 3/3] Split into {} /{} subnets.",
         subnets.len(),

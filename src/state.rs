@@ -22,6 +22,9 @@ pub struct IpManager {
     best_subnets_cache: Arc<ArcSwap<Vec<IpNet>>>,
     /// 按 colo 分组的最佳子网缓存
     best_by_colo: Arc<ArcSwap<HashMap<String, Vec<IpNet>>>>,
+    /// 全量子网按评分降序排列的缓存（Web 接口用）
+    sorted_subnets_cache:
+        Arc<ArcSwap<Vec<SubnetQuality>>>,
     /// 全局资源限制（FD 信号量）
     fd_semaphore: Arc<Semaphore>,
 }
@@ -37,9 +40,18 @@ impl IpManager {
     pub fn new() -> Self {
         Self {
             subnets: Arc::new(DashMap::new()),
-            best_subnets_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
-            best_by_colo: Arc::new(ArcSwap::from_pointee(HashMap::new())),
-            fd_semaphore: Arc::new(Semaphore::new(1024)),
+            best_subnets_cache: Arc::new(
+                ArcSwap::from_pointee(Vec::new()),
+            ),
+            best_by_colo: Arc::new(
+                ArcSwap::from_pointee(HashMap::new()),
+            ),
+            sorted_subnets_cache: Arc::new(
+                ArcSwap::from_pointee(Vec::new()),
+            ),
+            fd_semaphore: Arc::new(
+                Semaphore::new(1024),
+            ),
         }
     }
 
@@ -129,8 +141,15 @@ impl IpManager {
             self.subnets.iter().map(|e| e.value().clone()).collect();
 
         if all_subnets.is_empty() {
-            self.best_subnets_cache.store(Arc::new(Vec::new()));
-            self.best_by_colo.store(Arc::new(HashMap::new()));
+            self.best_subnets_cache.store(
+                Arc::new(Vec::new()),
+            );
+            self.best_by_colo.store(
+                Arc::new(HashMap::new()),
+            );
+            self.sorted_subnets_cache.store(
+                Arc::new(Vec::new()),
+            );
             return;
         }
 
@@ -154,12 +173,31 @@ impl IpManager {
             top_k_percent * 100.0
         );
 
-        self.best_subnets_cache.store(Arc::new(top_subnets));
+        self.best_subnets_cache.store(
+            Arc::new(top_subnets),
+        );
         self.best_by_colo.store(Arc::new(colo_map));
+        // 全量排序结果写入缓存，供 Web 接口零拷贝读取
+        self.sorted_subnets_cache.store(
+            Arc::new(all_subnets),
+        );
     }
 
     pub fn best_cache_len(&self) -> usize {
         self.best_subnets_cache.load().len()
+    }
+
+    /// 获取按评分降序排列的全量子网缓存（零拷贝）
+    ///
+    /// 缓存在 recalculate_best_subnets 中更新，
+    /// Web 接口直接读取。
+    ///
+    /// # 返回值
+    /// Arc 引用的排序子网列表
+    pub fn get_sorted_subnets(
+        &self,
+    ) -> arc_swap::Guard<Arc<Vec<SubnetQuality>>> {
+        self.sorted_subnets_cache.load()
     }
 
     /// 获取用于转发的目标 IP 列表

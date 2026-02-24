@@ -434,7 +434,7 @@ async fn connect_with_fallback(
     port: u16,
     ip_manager: &IpManager,
 ) -> anyhow::Result<TcpStream> {
-    let _permit = ip_manager.acquire_fd_permit().await.ok();
+    let _permit = ip_manager.acquire_fd_permit().await?;
     let target_addr = SocketAddr::new(ip, port);
 
     let connect_result = timeout(

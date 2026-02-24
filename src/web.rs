@@ -100,16 +100,18 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(response))
 }
 
-async fn get_status(State(state): State<AppState>) -> Json<Vec<SubnetQuality>> {
-    let mut subnets: Vec<SubnetQuality> = state.ip_manager.get_all_subnets();
-    subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
-    Json(subnets)
+async fn get_status(
+    State(state): State<AppState>,
+) -> Json<Vec<SubnetQuality>> {
+    let cached = state.ip_manager.get_sorted_subnets();
+    Json((**cached).clone())
 }
 
-async fn get_subnets_api(State(state): State<AppState>) -> Json<StatusResponse> {
-    let mut subnets: Vec<SubnetQuality> = state.ip_manager.get_all_subnets();
-    subnets.sort_by(|a, b| b.score.total_cmp(&a.score));
-
+async fn get_subnets_api(
+    State(state): State<AppState>,
+) -> Json<StatusResponse> {
+    let cached = state.ip_manager.get_sorted_subnets();
+    let subnets = (**cached).clone();
     Json(StatusResponse {
         total_subnets: subnets.len(),
         subnets,
