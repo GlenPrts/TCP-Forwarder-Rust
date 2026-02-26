@@ -49,7 +49,7 @@
 
   // --- 后台定时扫描 ---
   "background_scan": {
-    "enabled": true,
+    "enabled": false,
     // 扫描间隔（秒），最小 60
     "interval_secs": 18000,
     // 并发探测数
@@ -84,11 +84,13 @@
 
   // --- 评分权重配置 ---
   // 基础分 100，延迟每 10ms 扣 1 分，
-  // 抖动每 5ms 扣 1 分，丢包每 1% 扣 50 分
+  // 抖动每 5ms 扣 1 分，丢包每 1% 扣 15 分
   "scoring": {
     "base_score": 100.0,
     "latency_penalty_per_10ms": 1.0,
     "jitter_penalty_per_5ms": 1.0,
-    "loss_penalty_per_percent": 50.0
+    "loss_penalty_per_percent": 15.0,
+    "traffic_ema_alpha": 0.1, 
+    "cache_refresh_interval_sec": 15
   }
 }
