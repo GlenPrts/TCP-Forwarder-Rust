@@ -1,3 +1,4 @@
+use crate::config::ScoringConfig;
 use crate::model::SubnetQuality;
 use crate::utils::generate_random_ip_in_subnet;
 use anyhow::Result;
@@ -23,8 +24,7 @@ pub struct IpManager {
     /// 按 colo 分组的最佳子网缓存
     best_by_colo: Arc<ArcSwap<HashMap<String, Vec<IpNet>>>>,
     /// 全量子网按评分降序排列的缓存（Web 接口用）
-    sorted_subnets_cache:
-        Arc<ArcSwap<Vec<SubnetQuality>>>,
+    sorted_subnets_cache: Arc<ArcSwap<Vec<SubnetQuality>>>,
     /// 全局资源限制（FD 信号量）
     fd_semaphore: Arc<Semaphore>,
 }
@@ -40,18 +40,10 @@ impl IpManager {
     pub fn new() -> Self {
         Self {
             subnets: Arc::new(DashMap::new()),
-            best_subnets_cache: Arc::new(
-                ArcSwap::from_pointee(Vec::new()),
-            ),
-            best_by_colo: Arc::new(
-                ArcSwap::from_pointee(HashMap::new()),
-            ),
-            sorted_subnets_cache: Arc::new(
-                ArcSwap::from_pointee(Vec::new()),
-            ),
-            fd_semaphore: Arc::new(
-                Semaphore::new(1024),
-            ),
+            best_subnets_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            best_by_colo: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            sorted_subnets_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fd_semaphore: Arc::new(Semaphore::new(1024)),
         }
     }
 
@@ -62,6 +54,40 @@ impl IpManager {
             quality.subnet, quality.score
         );
         self.subnets.insert(quality.subnet, quality);
+    }
+
+    /// 使用 EMA (指数移动平均) 更新子网质量指标
+    pub fn update_subnet_metrics_ema(
+        &self,
+        subnet: &IpNet,
+        latency_ms: u64,
+        is_success: bool,
+        alpha: f64,
+        cfg: &ScoringConfig,
+    ) {
+        if let Some(mut entry) = self.subnets.get_mut(subnet) {
+            let quality = entry.value_mut();
+
+            let new_latency = latency_ms as f64;
+            let mut new_loss_rate = 1.0;
+            if is_success {
+                new_loss_rate = 0.0;
+            }
+
+            quality.avg_latency =
+                (alpha * new_latency + (1.0 - alpha) * (quality.avg_latency as f64)) as u64;
+            quality.avg_loss_rate =
+                (alpha * new_loss_rate + (1.0 - alpha) * (quality.avg_loss_rate as f64)) as f32;
+
+            let latency_penalty =
+                (quality.avg_latency as f32) / 10.0 * cfg.latency_penalty_per_10ms;
+            let jitter_penalty = (quality.avg_jitter as f32) / 5.0 * cfg.jitter_penalty_per_5ms;
+            let loss_penalty = quality.avg_loss_rate * 100.0 * cfg.loss_penalty_per_percent;
+
+            quality.score =
+                (cfg.base_score - latency_penalty - jitter_penalty - loss_penalty).max(0.0);
+            quality.last_updated = Utc::now();
+        }
     }
 
     pub fn cleanup_subnets(
@@ -141,15 +167,9 @@ impl IpManager {
             self.subnets.iter().map(|e| e.value().clone()).collect();
 
         if all_subnets.is_empty() {
-            self.best_subnets_cache.store(
-                Arc::new(Vec::new()),
-            );
-            self.best_by_colo.store(
-                Arc::new(HashMap::new()),
-            );
-            self.sorted_subnets_cache.store(
-                Arc::new(Vec::new()),
-            );
+            self.best_subnets_cache.store(Arc::new(Vec::new()));
+            self.best_by_colo.store(Arc::new(HashMap::new()));
+            self.sorted_subnets_cache.store(Arc::new(Vec::new()));
             return;
         }
 
@@ -173,14 +193,10 @@ impl IpManager {
             top_k_percent * 100.0
         );
 
-        self.best_subnets_cache.store(
-            Arc::new(top_subnets),
-        );
+        self.best_subnets_cache.store(Arc::new(top_subnets));
         self.best_by_colo.store(Arc::new(colo_map));
         // 全量排序结果写入缓存，供 Web 接口零拷贝读取
-        self.sorted_subnets_cache.store(
-            Arc::new(all_subnets),
-        );
+        self.sorted_subnets_cache.store(Arc::new(all_subnets));
     }
 
     pub fn best_cache_len(&self) -> usize {
@@ -194,9 +210,7 @@ impl IpManager {
     ///
     /// # 返回值
     /// Arc 引用的排序子网列表
-    pub fn get_sorted_subnets(
-        &self,
-    ) -> arc_swap::Guard<Arc<Vec<SubnetQuality>>> {
+    pub fn get_sorted_subnets(&self) -> arc_swap::Guard<Arc<Vec<SubnetQuality>>> {
         self.sorted_subnets_cache.load()
     }
 
@@ -211,7 +225,7 @@ impl IpManager {
         target_colos: &[String],
         n_subnets: usize,
         m_ips: usize,
-    ) -> Vec<IpAddr> {
+    ) -> Vec<(IpAddr, IpNet)> {
         let candidates = self.get_colo_filtered_subnets(target_colos);
 
         if candidates.is_empty() {
@@ -256,11 +270,11 @@ impl IpManager {
         subnets: &[IpNet],
         m_ips: usize,
         rng: &mut impl Rng,
-    ) -> Vec<IpAddr> {
+    ) -> Vec<(IpAddr, IpNet)> {
         let mut target_ips = Vec::with_capacity(subnets.len() * m_ips);
         for subnet in subnets {
             for _ in 0..m_ips {
-                target_ips.push(generate_random_ip_in_subnet(subnet, rng));
+                target_ips.push((generate_random_ip_in_subnet(subnet, rng), *subnet));
             }
         }
 
@@ -389,5 +403,141 @@ mod tests {
         )
         .await;
         assert!(permit3.is_ok());
+    }
+
+    /// 辅助函数：创建指定参数的子网质量数据
+    ///
+    /// # 参数
+    /// - `subnet_str`: 子网字符串（如 "1.2.3.0/24"）
+    /// - `latency`: 平均延迟（毫秒）
+    /// - `loss_rate`: 丢包率（0.0-1.0）
+    /// - `score`: 初始评分
+    ///
+    /// # 返回值
+    /// SubnetQuality 实例
+    fn make_subnet_quality(
+        subnet_str: &str,
+        latency: u64,
+        loss_rate: f32,
+        score: f32,
+    ) -> SubnetQuality {
+        SubnetQuality {
+            subnet: subnet_str.parse().unwrap(),
+            score,
+            avg_latency: latency,
+            avg_jitter: 10,
+            avg_loss_rate: loss_rate,
+            sample_count: 5,
+            colo: "LAX".to_string(),
+            last_updated: Utc::now(),
+        }
+    }
+
+    /// 测试成功连接后 EMA 更新
+    ///
+    /// 初始子网延迟 200ms、丢包 0.5，
+    /// 成功连接 50ms 后延迟应下降、丢包应下降、
+    /// 分数应提升。
+    #[test]
+    fn test_ema_update_success() {
+        let manager = IpManager::new();
+        let cfg = ScoringConfig::default();
+        let subnet_str = "10.0.0.0/24";
+        let subnet: IpNet = subnet_str.parse().unwrap();
+
+        let quality = make_subnet_quality(subnet_str, 200, 0.01, 28.0);
+        let old_latency = quality.avg_latency;
+        let old_loss = quality.avg_loss_rate;
+        let old_score = quality.score;
+        manager.update_subnet(quality);
+
+        // 成功连接，延迟 50ms
+        manager.update_subnet_metrics_ema(&subnet, 50, true, 0.3, &cfg);
+
+        let entry = manager.subnets.get(&subnet).unwrap();
+        let q = entry.value();
+
+        // 延迟应下降
+        assert!(
+            q.avg_latency < old_latency,
+            "latency should decrease: {} < {}",
+            q.avg_latency,
+            old_latency,
+        );
+        // 丢包率应下降
+        assert!(
+            q.avg_loss_rate < old_loss,
+            "loss should decrease: {} < {}",
+            q.avg_loss_rate,
+            old_loss,
+        );
+        // 分数应提升
+        assert!(
+            q.score > old_score,
+            "score should increase: {} > {}",
+            q.score,
+            old_score,
+        );
+    }
+
+    /// 测试失败连接后 EMA 更新
+    ///
+    /// 初始子网延迟 100ms、丢包 0.0、高分，
+    /// 失败连接 2000ms 后延迟应上升、丢包应上升、
+    /// 分数应下降。
+    #[test]
+    fn test_ema_update_failure() {
+        let manager = IpManager::new();
+        let cfg = ScoringConfig::default();
+        let subnet_str = "10.1.0.0/24";
+        let subnet: IpNet = subnet_str.parse().unwrap();
+
+        let quality = make_subnet_quality(subnet_str, 100, 0.0, 90.0);
+        let old_latency = quality.avg_latency;
+        let old_loss = quality.avg_loss_rate;
+        let old_score = quality.score;
+        manager.update_subnet(quality);
+
+        // 失败连接，延迟 2000ms
+        manager.update_subnet_metrics_ema(&subnet, 2000, false, 0.3, &cfg);
+
+        let entry = manager.subnets.get(&subnet).unwrap();
+        let q = entry.value();
+
+        // 延迟应上升
+        assert!(
+            q.avg_latency > old_latency,
+            "latency should increase: {} > {}",
+            q.avg_latency,
+            old_latency,
+        );
+        // 丢包率应上升
+        assert!(
+            q.avg_loss_rate > old_loss,
+            "loss should increase: {} > {}",
+            q.avg_loss_rate,
+            old_loss,
+        );
+        // 分数应下降
+        assert!(
+            q.score < old_score,
+            "score should decrease: {} < {}",
+            q.score,
+            old_score,
+        );
+    }
+
+    /// 测试对不存在的子网调用 EMA 更新不会 panic
+    #[test]
+    fn test_ema_update_unknown_subnet() {
+        let manager = IpManager::new();
+        let cfg = ScoringConfig::default();
+        let subnet: IpNet = "192.168.0.0/24".parse().unwrap();
+
+        // 子网不存在，调用不应 panic
+        manager.update_subnet_metrics_ema(&subnet, 100, true, 0.3, &cfg);
+
+        // 子网仍不存在
+        assert_eq!(manager.subnet_count(), 0);
     }
 }

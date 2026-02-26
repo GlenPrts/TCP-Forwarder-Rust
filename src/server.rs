@@ -1,8 +1,10 @@
 use crate::config::AppConfig;
+use crate::config::ScoringConfig;
 use crate::metrics::ForwardMetrics;
 use crate::pool::ConnectionPool;
 use crate::state::IpManager;
 use futures::stream::{FuturesUnordered, StreamExt};
+use ipnet::IpNet;
 use socket2::{SockRef, TcpKeepalive};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -134,6 +136,8 @@ fn handle_accept_result(
 struct ConnectionResult {
     stream: TcpStream,
     ip: IpAddr,
+    /// 所属子网，用于 EMA 更新
+    subnet: IpNet,
     connect_time: Duration,
 }
 
@@ -262,9 +266,18 @@ async fn connect_via_race(
         config.target_port,
         config.staggered_delay_ms,
         ip_manager,
+        config,
     )
     .await
     {
+        // 竞速成功：EMA 正反馈
+        ip_manager.update_subnet_metrics_ema(
+            &result.subnet,
+            result.connect_time.as_millis() as u64,
+            true,
+            config.scoring.traffic_ema_alpha,
+            &config.scoring,
+        );
         info!(
             "Fastest connection: {} for {} ({:?})",
             result.ip, client_addr, result.connect_time
@@ -290,6 +303,13 @@ fn handle_no_ips(config: &AppConfig) -> anyhow::Error {
 }
 
 /// 执行回退连接
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+///
+/// # 返回值
+/// - `anyhow::Result<TcpStream>`: 建立的 TCP 连接
 async fn perform_fallback(config: &AppConfig, ip_manager: &IpManager) -> anyhow::Result<TcpStream> {
     let fallback_ips = ip_manager.get_target_ips(&config.target_colos, 1, 1);
 
@@ -298,7 +318,7 @@ async fn perform_fallback(config: &AppConfig, ip_manager: &IpManager) -> anyhow:
         return Err(anyhow::anyhow!("No available IPs for fallback"));
     }
 
-    connect_with_fallback(fallback_ips[0], config.target_port, ip_manager).await
+    connect_with_fallback(fallback_ips[0].0, config.target_port, ip_manager).await
 }
 
 /// 尝试单个连接
@@ -306,70 +326,110 @@ async fn perform_fallback(config: &AppConfig, ip_manager: &IpManager) -> anyhow:
 /// # 参数
 /// - `ip`: 目标 IP
 /// - `port`: 目标端口
+/// - `subnet`: 所属子网（用于 EMA 反馈）
 /// - `ip_manager`: IP 管理器
 /// - `cancel_token`: 取消令牌
+/// - `scoring`: 评分配置
 ///
 /// # 返回值
 /// - `Option<ConnectionResult>`: 连接结果
 async fn try_connect_single(
     ip: IpAddr,
     port: u16,
+    subnet: IpNet,
     ip_manager: &IpManager,
     cancel_token: CancellationToken,
+    scoring: &ScoringConfig,
 ) -> Option<ConnectionResult> {
     let target_addr = SocketAddr::new(ip, port);
 
     tokio::select! {
+        // 被取消 = 其他连接已胜出，不是失败
         _ = cancel_token.cancelled() => {
             debug!("Connection task cancelled for {}", ip);
             None
         }
-        result = async {
-            // 获取许可，如果失败则直接返回 None
-            let permit = match ip_manager.acquire_fd_permit().await {
-                Ok(p) => p,
-                Err(_) => return None,
-            };
-
-            let start = Instant::now();
-            let connect_result = timeout(
-                Duration::from_millis(CONNECT_TIMEOUT_MS),
-                TcpStream::connect(target_addr),
-            )
-            .await;
-
-            let stream = match connect_result {
-                Ok(Ok(s)) => s,
-                _ => {
-                    drop(permit);
-                    return None;
-                }
-            };
-
-            Some(ConnectionResult {
-                stream,
-                ip,
-                connect_time: start.elapsed(),
-            })
-        } => result,
+        result = try_connect_inner(
+            target_addr,
+            ip,
+            subnet,
+            ip_manager,
+            scoring,
+        ) => result,
     }
+}
+
+/// 执行实际的 TCP 连接尝试并反馈 EMA
+///
+/// # 参数
+/// - `target_addr`: 目标地址
+/// - `ip`: 目标 IP
+/// - `subnet`: 所属子网
+/// - `ip_manager`: IP 管理器
+/// - `scoring`: 评分配置
+///
+/// # 返回值
+/// - `Option<ConnectionResult>`: 连接结果
+async fn try_connect_inner(
+    target_addr: SocketAddr,
+    ip: IpAddr,
+    subnet: IpNet,
+    ip_manager: &IpManager,
+    scoring: &ScoringConfig,
+) -> Option<ConnectionResult> {
+    let permit = match ip_manager.acquire_fd_permit().await {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+
+    let start = Instant::now();
+    let connect_result = timeout(
+        Duration::from_millis(CONNECT_TIMEOUT_MS),
+        TcpStream::connect(target_addr),
+    )
+    .await;
+
+    let stream = match connect_result {
+        Ok(Ok(s)) => s,
+        _ => {
+            // 连接明确失败：超时或被拒绝
+            ip_manager.update_subnet_metrics_ema(
+                &subnet,
+                CONNECT_TIMEOUT_MS,
+                false,
+                scoring.traffic_ema_alpha,
+                scoring,
+            );
+            drop(permit);
+            return None;
+        }
+    };
+
+    Some(ConnectionResult {
+        stream,
+        ip,
+        subnet,
+        connect_time: start.elapsed(),
+    })
 }
 
 /// 并发连接竞速 - 返回最快建立的连接（阶梯启动）
 ///
 /// # 参数
-/// - `candidate_ips`: 候选 IP 列表
+/// - `candidate_ips`: 候选 IP 与子网列表
 /// - `target_port`: 目标端口
 /// - `staggered_delay_ms`: 阶梯启动延迟
 /// - `ip_manager`: IP 管理器
+/// - `config`: 应用配置
 ///
 /// # 返回值
 /// - `Option<ConnectionResult>`: 最快建立的连接
 async fn race_connections(
-    candidate_ips: &[IpAddr],
+    candidate_ips: &[(IpAddr, IpNet)],
     target_port: u16,
     staggered_delay_ms: u64,
     ip_manager: &IpManager,
+    config: &AppConfig,
 ) -> Option<ConnectionResult> {
     if candidate_ips.is_empty() {
         return None;
@@ -377,48 +437,136 @@ async fn race_connections(
     let cancel_token = CancellationToken::new();
     let mut tasks = FuturesUnordered::new();
     let mut next_ip_idx = 0;
-    let selection_timeout = Duration::from_millis(SELECTION_TIMEOUT_MS);
-    let total_timeout_fut = tokio::time::sleep(selection_timeout);
+    let total_timeout = Duration::from_millis(SELECTION_TIMEOUT_MS);
+    let total_timeout_fut = tokio::time::sleep(total_timeout);
     tokio::pin!(total_timeout_fut);
+
     while next_ip_idx < candidate_ips.len() || !tasks.is_empty() {
         if next_ip_idx < candidate_ips.len() {
-            let ip = candidate_ips[next_ip_idx];
-            debug!(
-                "Starting staggered connection attempt {}/{} to {}",
-                next_ip_idx + 1,
-                candidate_ips.len(),
-                ip
-            );
-            tasks.push(try_connect_single(
-                ip,
+            launch_next_attempt(
+                candidate_ips,
                 target_port,
                 ip_manager,
-                cancel_token.clone(),
-            ));
-            next_ip_idx += 1;
+                config,
+                &cancel_token,
+                &mut tasks,
+                &mut next_ip_idx,
+            );
         }
-        let mut delay = Duration::from_secs(86400);
-        if next_ip_idx < candidate_ips.len() {
-            delay = Duration::from_millis(staggered_delay_ms);
-        }
-        let interval_fut = tokio::time::sleep(delay);
+        let stagger = stagger_delay(next_ip_idx, candidate_ips.len(), staggered_delay_ms);
+        let interval_fut = tokio::time::sleep(stagger);
         tokio::pin!(interval_fut);
-        tokio::select! {
-            _ = &mut total_timeout_fut => {
-                debug!("Connection selection timed out");
-                cancel_token.cancel();
-                return None;
-            }
-            res = tasks.next(), if !tasks.is_empty() => {
-                if let Some(Some(conn)) = res {
-                    cancel_token.cancel();
-                    return Some(conn);
-                }
-            }
-            _ = &mut interval_fut, if next_ip_idx < candidate_ips.len() => {}
+        let found = race_select(
+            &mut total_timeout_fut,
+            &mut tasks,
+            &mut interval_fut,
+            next_ip_idx < candidate_ips.len(),
+            &cancel_token,
+        )
+        .await;
+        if let Some(conn) = found {
+            return Some(conn);
         }
     }
     None
+}
+
+/// 启动下一个连接尝试
+///
+/// # 参数
+/// - `candidate_ips`: 候选 IP 与子网列表
+/// - `target_port`: 目标端口
+/// - `ip_manager`: IP 管理器
+/// - `config`: 应用配置
+/// - `cancel_token`: 取消令牌
+/// - `tasks`: 并发任务集合
+/// - `next_ip_idx`: 下一个 IP 索引
+#[allow(clippy::too_many_arguments)]
+fn launch_next_attempt<'a>(
+    candidate_ips: &[(IpAddr, IpNet)],
+    target_port: u16,
+    ip_manager: &'a IpManager,
+    config: &'a AppConfig,
+    cancel_token: &CancellationToken,
+    tasks: &mut FuturesUnordered<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Option<ConnectionResult>> + Send + 'a>>,
+    >,
+    next_ip_idx: &mut usize,
+) {
+    let (ip, subnet) = candidate_ips[*next_ip_idx];
+    debug!(
+        "Starting staggered attempt {}/{} to {}",
+        *next_ip_idx + 1,
+        candidate_ips.len(),
+        ip
+    );
+    let token = cancel_token.clone();
+    let scoring = &config.scoring;
+    tasks.push(Box::pin(try_connect_single(
+        ip,
+        target_port,
+        subnet,
+        ip_manager,
+        token,
+        scoring,
+    )));
+    *next_ip_idx += 1;
+}
+
+/// 计算阶梯延迟
+///
+/// # 参数
+/// - `next_idx`: 下一个 IP 索引
+/// - `total`: 候选 IP 总数
+/// - `delay_ms`: 阶梯延迟毫秒数
+///
+/// # 返回值
+/// - `Duration`: 延迟时间
+fn stagger_delay(next_idx: usize, total: usize, delay_ms: u64) -> Duration {
+    if next_idx < total {
+        return Duration::from_millis(delay_ms);
+    }
+    Duration::from_secs(86400)
+}
+
+/// 竞速 select 分支
+///
+/// # 参数
+/// - `total_timeout_fut`: 总超时 Future
+/// - `tasks`: 并发任务集合
+/// - `interval_fut`: 阶梯间隔 Future
+/// - `has_more`: 是否还有更多 IP 待启动
+/// - `cancel_token`: 取消令牌
+///
+/// # 返回值
+/// - `Option<ConnectionResult>`: 竞速结果
+async fn race_select<Fut>(
+    total_timeout_fut: &mut std::pin::Pin<&mut tokio::time::Sleep>,
+    tasks: &mut FuturesUnordered<Fut>,
+    interval_fut: &mut std::pin::Pin<&mut tokio::time::Sleep>,
+    has_more: bool,
+    cancel_token: &CancellationToken,
+) -> Option<ConnectionResult>
+where
+    Fut: std::future::Future<Output = Option<ConnectionResult>>,
+{
+    tokio::select! {
+        _ = &mut *total_timeout_fut => {
+            debug!("Connection selection timed out");
+            cancel_token.cancel();
+            None
+        }
+        res = tasks.next(), if !tasks.is_empty() => {
+            if let Some(Some(conn)) = res {
+                cancel_token.cancel();
+                return Some(conn);
+            }
+            None
+        }
+        _ = &mut *interval_fut, if has_more => {
+            None
+        }
+    }
 }
 
 /// 使用回退策略连接

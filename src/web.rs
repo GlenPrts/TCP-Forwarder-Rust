@@ -100,16 +100,12 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(response))
 }
 
-async fn get_status(
-    State(state): State<AppState>,
-) -> Json<Vec<SubnetQuality>> {
+async fn get_status(State(state): State<AppState>) -> Json<Vec<SubnetQuality>> {
     let cached = state.ip_manager.get_sorted_subnets();
     Json((**cached).clone())
 }
 
-async fn get_subnets_api(
-    State(state): State<AppState>,
-) -> Json<StatusResponse> {
+async fn get_subnets_api(State(state): State<AppState>) -> Json<StatusResponse> {
     let cached = state.ip_manager.get_sorted_subnets();
     let subnets = (**cached).clone();
     Json(StatusResponse {

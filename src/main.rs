@@ -10,6 +10,7 @@ mod utils;
 mod web;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use config::AppConfig;
 use metrics::ForwardMetrics;
@@ -19,7 +20,7 @@ use server::start_server;
 use state::IpManager;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use web::start_web_server;
 
 /// 打印帮助信息
@@ -191,11 +192,13 @@ fn spawn_pool_refill(
 /// - `web_handle`: Web 服务任务句柄
 /// - `scan_handle`: 后台扫描任务句柄（可选）
 /// - `pool_handle`: 连接池补充任务句柄（可选）
+/// - `cache_handle`: 缓存刷新任务句柄
 async fn graceful_shutdown(
     server_handle: tokio::task::JoinHandle<()>,
     web_handle: tokio::task::JoinHandle<()>,
     scan_handle: Option<tokio::task::JoinHandle<()>>,
     pool_handle: Option<tokio::task::JoinHandle<()>>,
+    cache_handle: tokio::task::JoinHandle<()>,
 ) {
     let shutdown_timeout = tokio::time::Duration::from_secs(10);
     tokio::select! {
@@ -208,6 +211,7 @@ async fn graceful_shutdown(
             if let Some(h) = pool_handle {
                 let _ = h.await;
             }
+            let _ = cache_handle.await;
         } => {
             info!("All services shut down gracefully");
         }
@@ -251,12 +255,68 @@ async fn run_forward_mode(config: Arc<AppConfig>, ip_manager: IpManager, scan_on
 
     let scan_handle = spawn_background_scan(&config, &ip_manager, &cancel_token, scan_on_start);
 
+    let cache_handle = spawn_cache_refresh(&config, &ip_manager, &cancel_token);
+
     let _ = tokio::signal::ctrl_c().await;
     info!("Received Ctrl+C, initiating graceful shutdown...");
 
     cancel_token.cancel();
 
-    graceful_shutdown(server_handle, web_handle, scan_handle, pool_handle).await;
+    graceful_shutdown(
+        server_handle,
+        web_handle,
+        scan_handle,
+        pool_handle,
+        cache_handle,
+    )
+    .await;
+}
+
+/// 启动后台缓存刷新任务
+///
+/// 定期调用 `recalculate_best_subnets`，
+/// 使最新的实时 EMA 评分对路由生效。
+///
+/// # 参数
+/// - `config`: 应用配置
+/// - `ip_manager`: IP 管理器
+/// - `cancel_token`: 取消令牌
+///
+/// # 返回值
+/// 后台任务句柄
+fn spawn_cache_refresh(
+    config: &Arc<AppConfig>,
+    ip_manager: &IpManager,
+    cancel_token: &CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let interval_sec = config.scoring.cache_refresh_interval_sec;
+    let top_k = config.selection_top_k_percent;
+    let manager = ip_manager.clone();
+    let token = cancel_token.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+        // 跳过首次立即触发
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    info!(
+                        "Cache refresh loop shutting down"
+                    );
+                    break;
+                }
+                _ = interval.tick() => {
+                    manager.recalculate_best_subnets(
+                        top_k,
+                    );
+                    debug!(
+                        "Cache refreshed (interval: {}s)",
+                        interval_sec,
+                    );
+                }
+            }
+        }
+    })
 }
 
 /// 启动后台扫描任务（如果配置启用）

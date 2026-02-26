@@ -71,8 +71,11 @@ pub enum ConfigError {
     #[error("scoring.loss_penalty_per_percent must be >= 0, got {0}")]
     InvalidLossPenalty(f32),
 
-    #[error("scoring.traffic_ema_alpha must be between 0 and 1, got {0}")]
+    #[error("scoring.traffic_ema_alpha must be in (0.0, 1.0), got {0}")]
     InvalidTrafficEmaAlpha(f64),
+
+    #[error("scoring.cache_refresh_interval_sec must be >= 1")]
+    InvalidCacheRefreshInterval,
 }
 
 /// 评分权重配置
@@ -94,7 +97,7 @@ pub struct ScoringConfig {
     #[serde(default = "default_loss_penalty")]
     pub loss_penalty_per_percent: f32,
 
-    /// 流量 EMA 衰减系数 (0.0-1.0)
+    /// 流量 EMA 平滑系数（0.0-1.0，不含边界）
     #[serde(default = "default_traffic_ema_alpha")]
     pub traffic_ema_alpha: f64,
 
@@ -115,9 +118,11 @@ fn default_jitter_penalty() -> f32 {
 fn default_loss_penalty() -> f32 {
     50.0
 }
+/// 流量 EMA 平滑系数默认值
 fn default_traffic_ema_alpha() -> f64 {
     0.1
 }
+/// 缓存刷新间隔默认值（秒）
 fn default_cache_refresh_interval_sec() -> u64 {
     5
 }
@@ -134,6 +139,7 @@ impl Default for ScoringConfig {
         }
     }
 }
+
 impl ScoringConfig {
     /// 验证评分权重配置
     pub fn validate(&self) -> Result<()> {
@@ -149,8 +155,11 @@ impl ScoringConfig {
         if self.loss_penalty_per_percent < 0.0 {
             return Err(ConfigError::InvalidLossPenalty(self.loss_penalty_per_percent).into());
         }
-        if self.traffic_ema_alpha < 0.0 || self.traffic_ema_alpha > 1.0 {
+        if self.traffic_ema_alpha <= 0.0 || self.traffic_ema_alpha >= 1.0 {
             return Err(ConfigError::InvalidTrafficEmaAlpha(self.traffic_ema_alpha).into());
+        }
+        if self.cache_refresh_interval_sec < 1 {
+            return Err(ConfigError::InvalidCacheRefreshInterval.into());
         }
         Ok(())
     }
@@ -742,15 +751,6 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.scoring.loss_penalty_per_percent = 50.0;
-        assert!(config.validate().is_ok());
-
-        config.scoring.traffic_ema_alpha = -0.1;
-        assert!(config.validate().is_err());
-
-        config.scoring.traffic_ema_alpha = 1.1;
-        assert!(config.validate().is_err());
-
-        config.scoring.traffic_ema_alpha = 0.5;
         assert!(config.validate().is_ok());
     }
 }

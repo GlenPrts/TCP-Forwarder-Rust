@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, ConnectionPoolConfig};
 use crate::state::IpManager;
+use ipnet::IpNet;
 use parking_lot::Mutex;
 use socket2::{SockRef, TcpKeepalive};
 use std::collections::VecDeque;
@@ -250,10 +251,11 @@ fn configure_keepalive(stream: &TcpStream, config: &AppConfig) -> std::io::Resul
     socket_ref.set_tcp_keepalive(&keepalive)
 }
 
-/// 建立单个预连接
+/// 建立单个预连接并更新子网 EMA 指标
 ///
 /// # 参数
 /// - `ip`: 目标 IP
+/// - `subnet`: IP 所属子网（用于 EMA 指标更新）
 /// - `port`: 目标端口
 /// - `config`: 应用配置
 /// - `ip_manager`: IP 管理器
@@ -262,12 +264,14 @@ fn configure_keepalive(stream: &TcpStream, config: &AppConfig) -> std::io::Resul
 /// 成功返回池化连接，失败返回 None
 async fn pre_connect_one(
     ip: IpAddr,
+    subnet: IpNet,
     port: u16,
     config: &AppConfig,
     ip_manager: &IpManager,
 ) -> Option<PooledConnection> {
     let _permit = ip_manager.acquire_fd_permit().await.ok();
     let addr = SocketAddr::new(ip, port);
+    let start = Instant::now();
     let connect_result = timeout(
         Duration::from_millis(PRE_CONNECT_TIMEOUT_MS),
         TcpStream::connect(addr),
@@ -278,13 +282,36 @@ async fn pre_connect_one(
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             debug!("Pre-connect to {} failed: {}", addr, e);
+            ip_manager.update_subnet_metrics_ema(
+                &subnet,
+                PRE_CONNECT_TIMEOUT_MS,
+                false,
+                config.scoring.traffic_ema_alpha,
+                &config.scoring,
+            );
             return None;
         }
         Err(_) => {
             debug!("Pre-connect to {} timed out", addr);
+            ip_manager.update_subnet_metrics_ema(
+                &subnet,
+                PRE_CONNECT_TIMEOUT_MS,
+                false,
+                config.scoring.traffic_ema_alpha,
+                &config.scoring,
+            );
             return None;
         }
     };
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    ip_manager.update_subnet_metrics_ema(
+        &subnet,
+        elapsed_ms,
+        true,
+        config.scoring.traffic_ema_alpha,
+        &config.scoring,
+    );
 
     let _ = stream.set_nodelay(true);
     let _ = configure_keepalive(&stream, config);
@@ -337,7 +364,7 @@ async fn refill_to_target(
 /// - `pool`: 连接池
 /// - `config`: 应用配置
 /// - `ip_manager`: IP 管理器
-/// - `candidates`: 候选 IP 列表
+/// - `candidates`: 候选 IP 及子网列表
 ///
 /// # 返回值
 /// 成功建立并放入池中的连接数
@@ -345,13 +372,19 @@ async fn execute_refill(
     pool: &ConnectionPool,
     config: &AppConfig,
     ip_manager: &IpManager,
-    candidates: Vec<IpAddr>,
+    candidates: Vec<(IpAddr, IpNet)>,
 ) -> usize {
     use futures::stream::{FuturesUnordered, StreamExt};
     let mut futures = FuturesUnordered::new();
 
-    for ip in candidates {
-        futures.push(pre_connect_one(ip, config.target_port, config, ip_manager));
+    for (ip, subnet) in candidates {
+        futures.push(pre_connect_one(
+            ip,
+            subnet,
+            config.target_port,
+            config,
+            ip_manager,
+        ));
     }
 
     let mut filled = 0;
